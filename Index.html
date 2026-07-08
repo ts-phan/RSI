@@ -1,0 +1,1224 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Audit Interaction Voie-Ouvrage — UIC 774-3 / EN 1992-2</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #0A1120;
+    --panel: #111B2E;
+    --grid: #1E2A42;
+    --line: #2A3B57;
+    --ink: #E9EEF7;
+    --ink-dim: #8593AD;
+    --steel: #7FB3E8;
+    --signal: #3DDC97;
+    --amber: #FFA94D;
+    --alert: #FF6B4A;
+    --violet: #B79CFB;
+  }
+  html, body { background: var(--bg); }
+  body {
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    color: var(--ink);
+    background-image:
+      linear-gradient(rgba(127,179,232,0.05) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(127,179,232,0.05) 1px, transparent 1px);
+    background-size: 28px 28px;
+    background-position: -1px -1px;
+  }
+  .font-display { font-family: 'Space Grotesk', 'Inter', sans-serif; letter-spacing: -0.01em; }
+  .mono-num { font-family: 'IBM Plex Mono', ui-monospace, monospace; font-variant-numeric: tabular-nums; }
+  .eyebrow {
+    font-family: 'IBM Plex Mono', ui-monospace, monospace;
+    font-size: 11px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--ink-dim);
+  }
+  .panel {
+    background: var(--panel);
+    border: 1px solid var(--grid);
+    border-radius: 14px;
+    box-shadow: 0 1px 0 rgba(127,179,232,0.05) inset, 0 20px 40px -28px rgba(0,0,0,0.75);
+  }
+  input[type="number"], select {
+    background: #0D1626; color: var(--ink);
+  }
+  input[type="number"]:focus, select:focus, button:focus-visible {
+    outline: 2px solid var(--steel); outline-offset: 1px;
+  }
+  input[type="range"] { accent-color: var(--steel); }
+  /* Interrupteurs style "control panel" a la place des cases a cocher natives */
+  input[type="checkbox"] {
+    appearance: none; -webkit-appearance: none;
+    width: 34px; height: 20px; border-radius: 999px;
+    background: #1B2740; border: 1px solid var(--line);
+    position: relative; cursor: pointer; flex: none;
+    transition: background 0.15s ease;
+  }
+  input[type="checkbox"]::after {
+    content: ''; position: absolute; top: 2px; left: 2px;
+    width: 14px; height: 14px; border-radius: 999px;
+    background: var(--ink-dim); transition: transform 0.15s ease, background 0.15s ease;
+  }
+  input[type="checkbox"]:checked::after { transform: translateX(14px); background: #0A1120; }
+  input[type="checkbox"].accent-\[\#7FB3E8\]:checked { background: var(--steel); }
+  input[type="checkbox"].accent-\[\#FFA94D\]:checked { background: var(--amber); }
+  input[type="checkbox"].accent-\[\#3DDC97\]:checked { background: var(--signal); }
+  input[type="checkbox"].accent-\[\#B79CFB\]:checked { background: var(--violet); }
+  @keyframes pulse-dot { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
+  .status-dot { animation: pulse-dot 2s ease-in-out infinite; }
+  @media (prefers-reduced-motion: reduce) { .status-dot { animation: none; } }
+
+  /* Vue scindee : la config reste compacte et scrollable en haut, les resultats occupent le
+     reste de l'ecran et defilent independamment - on garde graphiques + KPI visibles sans
+     avoir a re-scroller toute la page a chaque changement de curseur. */
+  html, body { height: 100%; overflow: hidden; }
+  .app-shell { height: 100vh; height: 100dvh; display: flex; flex-direction: column; overflow: hidden; }
+  .pane-scroll { overflow-y: auto; -webkit-overflow-scrolling: touch; }
+  .pane-scroll::-webkit-scrollbar { width: 8px; height: 8px; }
+  .pane-scroll::-webkit-scrollbar-track { background: transparent; }
+  .pane-scroll::-webkit-scrollbar-thumb { background: #2A3B57; border-radius: 8px; }
+  .pane-scroll { scrollbar-width: thin; scrollbar-color: #2A3B57 transparent; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<script>
+"use strict";
+const e = React.createElement;
+const { useState, useMemo, useRef, useEffect } = React;
+
+// Mesure la largeur reelle (en px) du conteneur d'un graphique, pour construire le SVG
+// a l'echelle 1:1 (1 unite = 1px) plutot que de le redimensionner en CSS. Sans cela, le
+// texte des axes devient illisible sur mobile (viewBox fixe de 900px ecrase a ~320px).
+function useMeasuredWidth(defaultWidth) {
+  const ref = useRef(null);
+  const [width, setWidth] = useState(defaultWidth);
+  useEffect(() => {
+    const el = ref.current;
+    if (!el || typeof ResizeObserver === 'undefined') return;
+    const ro = new ResizeObserver((entries) => {
+      for (const entry of entries) {
+        const w = entry.contentRect.width;
+        if (w > 0) setWidth(w);
+      }
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+  return [ref, width];
+}
+let uidCounter = 100;
+function nextUid() { return ++uidCounter; }
+
+// ==========================================
+// 1. NOYAU DE CALCUL (MOTEUR PHYSIQUE)
+// ==========================================
+// NB: la resolution du systeme lineaire (solveBanded) est definie plus bas, juste avant
+// la classe Solver, car elle exploite la structure en bande propre a ce maillage.
+
+class NodeFE {
+  constructor(id, x, type) { this.id = id; this.x = x; this.type = type; }
+}
+class BarElement {
+  constructor(id, node1, node2, E, A, alpha, type) {
+    this.id = id; this.node1 = node1; this.node2 = node2;
+    this.E = E; this.A = A; this.alpha = alpha; this.type = type;
+    this.length = Math.abs(node2.x - node1.x);
+  }
+}
+class SpringElement {
+  constructor(id, nodeRail, nodeDeck, k_lin, f_max, u_limit) {
+    this.id = id; this.nodeRail = nodeRail; this.nodeDeck = nodeDeck;
+    this.k_lin = k_lin; this.f_max = f_max; this.u_limit = u_limit;
+    this.k_active = k_lin;
+  }
+}
+
+function findSpanAt(spans, posMm) {
+  let acc = 0;
+  for (const span of spans) {
+    const spanLenMm = span.length_m * 1000;
+    if (posMm >= acc - 1e-6 && posMm <= acc + spanLenMm + 1e-6) return span;
+    acc += spanLenMm;
+  }
+  return spans[spans.length - 1];
+}
+
+class Mesher {
+  constructor(data) { this.data = data; this.nodes = []; this.bars = []; this.springs = []; }
+
+  generate() {
+    const elemLength = this.data.meshSettings.elementLength_m * 1000;
+    const L_ancrage = this.data.track.anchorageLength_m * 1000;
+    let L_pont = this.data.bridge.spans.reduce((acc, span) => acc + span.length_m * 1000, 0);
+    const L_totale = L_ancrage + L_pont + L_ancrage;
+    const nbElements = Math.ceil(L_totale / elemLength);
+
+    const railMat = this.data.materials.railSteel;
+    const E_r = railMat.E_MPa, alpha_r = railMat.alpha;
+    const A_r = this.data.track.area_mm2 * 2;
+    const deckMat = this.data.materials.deckConcrete;
+    const E_d = deckMat.E_MPa, alpha_d = deckMat.alpha;
+
+    let nId = 1, eId = 1;
+    for (let i = 0; i <= nbElements; i++) {
+      let x = i * elemLength;
+      this.nodes.push(new NodeFE(nId++, x, 'rail'));
+      this.nodes.push(new NodeFE(nId++, x, 'deck'));
+    }
+
+    // Emprise de la charge verticale du train (LM71) : sous le convoi, la resistance
+    // longitudinale de la voie (ballast) est majoree par rapport a la voie non chargee (UIC 774-3).
+    const traffic = this.data.loadCases && this.data.loadCases.traffic;
+    let trafficStartX = null, trafficEndX = null;
+    if (traffic) {
+      trafficStartX = L_ancrage + traffic.startPosition_m * 1000;
+      trafficEndX = trafficStartX + traffic.length_m * 1000;
+    }
+    const uicUnloaded = this.data.track.uicResistance.unloaded;
+    const uicLoaded = this.data.track.uicResistance.loaded || uicUnloaded;
+
+    // Zone de raideur d'attaches modifiee (attaches speciales, patins, transition, etc.) :
+    // remplace localement la loi bilineaire UIC par des valeurs personnalisees sur [xStart, xEnd].
+    const fz = this.data.track.fasteningZone;
+    const fzActive = fz && fz.enabled;
+    const fzStartX = fzActive ? fz.xStart_m * 1000 : null;
+    const fzEndX = fzActive ? fz.xEnd_m * 1000 : null;
+
+    // Appareil de dilatation (AD) : coupure quasi-totale de la continuite du RAIL a une position
+    // donnee (le rail peut coulisser librement dans l'appareil, qui ne transmet quasiment aucun effort).
+    const ad = this.data.track.expansionDevice;
+    const adActive = ad && ad.enabled;
+    const adX = adActive ? ad.position_m * 1000 : null;
+    this.adBarId = null;
+    this.adNodeLeft = null;
+    this.adNodeRight = null;
+
+    for (let i = 0; i < nbElements; i++) {
+      let nr1 = this.nodes[i * 2], nd1 = this.nodes[i * 2 + 1];
+      let nr2 = this.nodes[(i + 1) * 2], nd2 = this.nodes[(i + 1) * 2 + 1];
+
+      let x_mid = (nr1.x + nr2.x) / 2;
+
+      // L'AD est localise dans l'element rail dont l'intervalle contient la position demandee.
+      // Intervalle semi-ouvert [nr1.x, nr2.x) pour garantir qu'un seul element ne soit selectionne
+      // meme si la position tombe exactement sur une frontiere de maillage (sinon les deux elements
+      // adjacents seraient tous deux traites comme l'AD, doublant artificiellement la coupure).
+      const isLastElement = i === nbElements - 1;
+      const isADBar = adActive && adX >= nr1.x && (isLastElement ? adX <= nr2.x : adX < nr2.x);
+      const A_r_eff = isADBar ? A_r * 1e-6 : A_r; // rigidite quasi nulle => joint libre
+      const railBar = new BarElement(eId++, nr1, nr2, E_r, A_r_eff, alpha_r, 'rail');
+      // Section nominale conservee pour le post-traitement : au droit de l'AD, l'effort
+      // reel transmis est quasi nul (rigidite quasi nulle), la contrainte affichee doit
+      // donc etre rapportee a la section reelle du rail, pas a la section reduite numeriquement.
+      railBar.A_nominal = A_r;
+      this.bars.push(railBar);
+      if (isADBar) { this.adBarId = railBar.id; this.adNodeLeft = nr1; this.adNodeRight = nr2; }
+
+      if (x_mid > L_ancrage && x_mid < L_ancrage + L_pont) {
+        const span = findSpanAt(this.data.bridge.spans, x_mid - L_ancrage);
+        this.bars.push(new BarElement(eId++, nd1, nd2, E_d, span.area_mm2, alpha_d, 'deck'));
+      }
+
+      const sousCharge = traffic && x_mid >= trafficStartX && x_mid <= trafficEndX;
+      const uic = sousCharge ? uicLoaded : uicUnloaded;
+      const inFasteningZone = fzActive && x_mid >= fzStartX && x_mid <= fzEndX;
+      const k_lin_kN_mm_m = inFasteningZone ? fz.k_lin_kN_mm_m : uic.k_lin_kN_mm_m;
+      const f_max_kN_m = inFasteningZone ? fz.f_max_kN_m : uic.f_max_kN_m;
+      let k_lin_el = k_lin_kN_mm_m * 1000 * (elemLength / 1000);
+      let f_max_el = f_max_kN_m * 1000 * (elemLength / 1000);
+      // Le seuil elastique-plastique doit correspondre au coude de la loi bilineaire
+      // (continuite de l'effort resistant) : u_limit = f_max / k_lin, sinon la fonction
+      // de raideur presente une discontinuite qui peut empecher la convergence.
+      let u_limit_el = f_max_el / k_lin_el;
+      this.springs.push(new SpringElement(eId++, nr1, nd1, k_lin_el, f_max_el, u_limit_el));
+    }
+  }
+}
+
+// Resolution d'un systeme lineaire bande (largeur 2*hb+1) sans pivotage : la matrice issue
+// de l'assemblage EF rail/tablier/ressorts est fortement diagonale-dominante (termes de
+// penalite 1e12 sur les DDL bloques), le pivotage n'est pas necessaire pour la stabilite.
+// Complexite O(n*hb^2) au lieu de O(n^3) pour l'elimination de Gauss dense - determinant
+// pour un maillage fin (des milliers de DDL).
+function solveBanded(bandK, F, hb) {
+  const n = F.length;
+  const K = bandK.map(row => row.slice());
+  const B = F.slice();
+
+  for (let i = 0; i < n; i++) {
+    const pivot = K[i][hb];
+    if (Math.abs(pivot) < 1e-10) continue;
+    const kMax = Math.min(i + hb, n - 1);
+    for (let k = i + 1; k <= kMax; k++) {
+      const rowK = K[k], rowI = K[i];
+      const factor = rowK[hb - (k - i)] / pivot;
+      if (factor === 0) continue;
+      const jMax = Math.min(i + hb, n - 1);
+      for (let j = i; j <= jMax; j++) rowK[hb + (j - k)] -= factor * rowI[hb + (j - i)];
+      B[k] -= factor * B[i];
+    }
+  }
+  const U = new Array(n).fill(0);
+  for (let i = n - 1; i >= 0; i--) {
+    let sum = B[i];
+    const jMax = Math.min(i + hb, n - 1);
+    for (let j = i + 1; j <= jMax; j++) sum -= K[i][hb + (j - i)] * U[j];
+    U[i] = sum / K[i][hb];
+  }
+  return U;
+}
+
+class Solver {
+  constructor(mesher, data) {
+    this.nodes = mesher.nodes; this.bars = mesher.bars; this.springs = mesher.springs;
+    this.data = data;
+    this.nDOF = this.nodes.length;
+    // Demi-largeur de bande : barre rail-rail=2, barre tablier-tablier=2, ressort rail-tablier=1.
+    // La numerotation des noeuds (rail,tablier,rail,tablier,...) garantit cette localite.
+    this.HB = 2;
+    this.U = new Array(this.nDOF).fill(0);
+    this.converged = false; this.iterations = 0;
+    this.adNodeLeft = mesher.adNodeLeft; this.adNodeRight = mesher.adNodeRight;
+  }
+
+  newBand() {
+    const rows = new Array(this.nDOF);
+    for (let i = 0; i < this.nDOF; i++) rows[i] = new Float64Array(2 * this.HB + 1);
+    return rows;
+  }
+  addK(K, i, j, val) { K[i][this.HB + (j - i)] += val; }
+
+  solve() {
+    const TOLERANCE = 1e-4;
+    // 250 iterations : necessaire pour les cas avec appareil de dilatation (AD), ou le fort
+    // contraste de raideur (barre AD quasi nulle vs barres/ressorts normaux) ralentit fortement
+    // la convergence du point fixe (Picard) par rapport aux cas sans AD (~20-50 iter. suffisent).
+    // Le solveur bande restant tres rapide, ce budget plus large ne coute presque rien en temps de calcul.
+    const MAX_ITER = 250;
+    const RELAX = 0.6;
+
+    // Partie constante de K et F : ne depend PAS des deplacements (barres, conditions aux
+    // limites, tassement d'appui, charges thermiques/freinage). Assemblee une seule fois,
+    // hors boucle - seuls les ressorts (plasticite UIC 774-3) changent a chaque iteration.
+    const K_base = this.newBand();
+    const F = new Array(this.nDOF).fill(0);
+    this.assembleBarsConstant(K_base);
+    this.applyBoundariesConstant(K_base, F);
+    this.assembleLoadsConstant(F);
+
+    let iter = 0, converged = false;
+    let U_old = new Array(this.nDOF).fill(0);
+
+    while (!converged && iter < MAX_ITER) {
+      const K = K_base.map(row => row.slice());
+      this.updateSprings(U_old);
+      this.addSpringsToK(K);
+
+      let U_new = solveBanded(K, F, this.HB);
+      let U_relax = U_new.map((u, i) => RELAX * u + (1 - RELAX) * U_old[i]);
+
+      let maxDiff = 0;
+      for (let i = 0; i < this.nDOF; i++) maxDiff = Math.max(maxDiff, Math.abs(U_relax[i] - U_old[i]));
+
+      if (maxDiff < TOLERANCE) converged = true;
+      U_old = U_relax;
+      iter++;
+    }
+    this.U = U_old; this.converged = converged; this.iterations = iter;
+  }
+
+  updateSprings(U) {
+    for (let s of this.springs) {
+      let deltaU = Math.abs(U[s.nodeRail.id - 1] - U[s.nodeDeck.id - 1]);
+      s.k_active = (deltaU <= s.u_limit || deltaU === 0) ? s.k_lin : s.f_max / deltaU;
+    }
+  }
+
+  assembleBarsConstant(K) {
+    for (let b of this.bars) {
+      let i = b.node1.id - 1, j = b.node2.id - 1;
+      let k = (b.E * b.A) / b.length;
+      this.addK(K, i, i, k); this.addK(K, i, j, -k); this.addK(K, j, i, -k); this.addK(K, j, j, k);
+    }
+  }
+
+  addSpringsToK(K) {
+    for (let s of this.springs) {
+      let r = s.nodeRail.id - 1, c = s.nodeDeck.id - 1;
+      this.addK(K, r, r, s.k_active); this.addK(K, r, c, -s.k_active);
+      this.addK(K, c, r, -s.k_active); this.addK(K, c, c, s.k_active);
+    }
+  }
+
+  // Conditions aux limites, y compris la dénivellation d'appui (déplacement imposé)
+  applyBoundariesConstant(K, F) {
+    const PENALTY = 1e12;
+    const L_ancrage = this.data.track.anchorageLength_m * 1000;
+    const L_pont = this.data.bridge.spans.reduce((acc, s) => acc + s.length_m * 1000, 0);
+    const halfMesh = (this.data.meshSettings.elementLength_m * 1000) / 2;
+
+    for (let n of this.nodes) {
+      let i = n.id - 1;
+      if (n.type === 'rail' && (n.x === 0 || n.x === this.nodes[this.nodes.length - 2].x)) {
+        this.addK(K, i, i, PENALTY);
+      }
+      if (n.type === 'deck') {
+        if (n.x < L_ancrage || n.x > L_ancrage + L_pont) {
+          this.addK(K, i, i, PENALTY);
+        } else {
+          let pos_pont = n.x - L_ancrage;
+          let appui = this.data.bridge.supports.find(s => Math.abs(s.position_m * 1000 - pos_pont) <= halfMesh);
+          if (appui) {
+            const settlement = appui.settlement_mm || 0;
+            if (settlement !== 0) {
+              this.addK(K, i, i, PENALTY);
+              F[i] += PENALTY * settlement;
+            } else if (appui.type === 'fixed') {
+              this.addK(K, i, i, PENALTY);
+            } else if (appui.type === 'elastic') {
+              this.addK(K, i, i, appui.stiffness_kN_mm * 1000);
+            }
+          }
+        }
+      }
+    }
+  }
+
+  assembleLoadsConstant(F) {
+    const dT_deck = this.data.loadCases.thermal.deltaT_deck_C;
+    const dT_rail = this.data.loadCases.thermal.deltaT_rail_C;
+
+    for (let b of this.bars) {
+      let i = b.node1.id - 1, j = b.node2.id - 1;
+      let F_therm = 0;
+      if (b.type === 'deck') F_therm = b.E * b.A * b.alpha * dT_deck;
+      else if (b.type === 'rail') F_therm = b.E * b.A * b.alpha * dT_rail;
+      F[i] -= F_therm; F[j] += F_therm;
+    }
+
+    if (this.data.loadCases.traffic) {
+      const t = this.data.loadCases.traffic;
+      const startX = this.data.track.anchorageLength_m * 1000 + t.startPosition_m * 1000;
+      const endX = startX + t.length_m * 1000;
+      for (let b of this.bars) {
+        if (b.type === 'rail') {
+          let x_mid = (b.node1.x + b.node2.x) / 2;
+          if (x_mid >= startX && x_mid <= endX) {
+            let f = (t.brakingForce_kN_m * b.length) / 2;
+            F[b.node1.id - 1] += f; F[b.node2.id - 1] += f;
+          }
+        }
+      }
+    }
+  }
+}
+
+class PostProcessor {
+  constructor(solver) { this.solver = solver; }
+  getResults() {
+    let graphData = [];
+    const U = this.solver.U;
+    const dT_rail = this.solver.data.loadCases.thermal.deltaT_rail_C;
+
+    for (let i = 0; i < this.solver.bars.length; i++) {
+      let b = this.solver.bars[i];
+      if (b.type === 'rail') {
+        let n1 = b.node1.id - 1, n2 = b.node2.id - 1;
+        let N = (b.E * b.A / b.length) * (U[n2] - U[n1]) - (b.E * b.A * b.alpha * dT_rail);
+        let stress = N / (b.A_nominal || b.A);
+        let spring = this.solver.springs.find(s => s.nodeRail.id === b.node1.id);
+        let slip = spring ? Math.abs(U[spring.nodeRail.id - 1] - U[spring.nodeDeck.id - 1]) : 0;
+
+        // Respiration du rail : deplacement longitudinal absolu du rail et du tablier
+        // (le noeud tablier colocalise a le meme x, id = id_rail + 1 par construction du maillage)
+        let deplRail = U[n1];
+        let deplTablier = U[b.node1.id];
+
+        graphData.push({
+          x: Math.round((b.node1.x / 1000) * 10) / 10,
+          contrainte: parseFloat(stress.toFixed(2)),
+          glissement: parseFloat(slip.toFixed(3)),
+          deplRail: parseFloat(deplRail.toFixed(3)),
+          deplTablier: parseFloat(deplTablier.toFixed(3))
+        });
+      }
+    }
+    let adDebattement = null;
+    if (this.solver.adNodeLeft && this.solver.adNodeRight) {
+      adDebattement = Math.abs(U[this.solver.adNodeRight.id - 1] - U[this.solver.adNodeLeft.id - 1]);
+    }
+
+    return { graphData, converged: this.solver.converged, iterations: this.solver.iterations, adDebattement };
+  }
+}
+
+// ==========================================
+// 2. GRAPHIQUES SVG (React.createElement pur, aucune dependance externe)
+// ==========================================
+
+function scaleLinear(domain, range) {
+  const d0 = domain[0], d1 = domain[1], r0 = range[0], r1 = range[1];
+  return v => r0 + ((v - d0) / (d1 - d0)) * (r1 - r0);
+}
+
+// Calcule un domaine d'axe Y adapte aux valeurs reelles (+ marge), en incluant
+// les seuils reglementaires affiches en ligne de reference pour garder le contexte visuel.
+function computeYDomain(values, refValues, opts) {
+  opts = opts || {};
+  let vals = values.filter(v => isFinite(v));
+  if (refValues && refValues.length) vals = vals.concat(refValues);
+  let min = vals.length ? Math.min.apply(null, vals) : -1;
+  let max = vals.length ? Math.max.apply(null, vals) : 1;
+  if (min === max) { min -= 1; max += 1; }
+  const range = max - min;
+  const pad = range * (opts.paddingFrac != null ? opts.paddingFrac : 0.18);
+  let lo = min - pad, hi = max + pad;
+  if (opts.symmetric) {
+    const m = Math.max(Math.abs(lo), Math.abs(hi));
+    lo = -m; hi = m;
+  }
+  if (opts.floorZero) lo = 0;
+  return [lo, hi];
+}
+
+function LineChartSVG(props) {
+  const data = props.data, xKey = props.xKey, yKey = props.yKey, yDomain = props.yDomain, color = props.color;
+  const refLinesY = props.refLinesY || [], refLinesX = props.refLinesX || [];
+  const colorBySign = props.colorBySign;
+  const positiveColor = props.positiveColor || '#3DDC97', negativeColor = props.negativeColor || '#FF6B4A';
+  const width = props.width || 900, height = props.height || 280;
+  const compact = width < 480;
+  const margin = compact ? { top: 16, right: 10, bottom: 24, left: 34 } : { top: 20, right: 20, bottom: 30, left: 50 };
+  const innerW = width - margin.left - margin.right;
+  const innerH = height - margin.top - margin.bottom;
+  if (!data.length) return null;
+
+  const xDomain = [data[0][xKey], data[data.length - 1][xKey]];
+  const xScale = scaleLinear(xDomain, [0, innerW]);
+  const yScale = scaleLinear(yDomain, [innerH, 0]);
+
+  // Trace en une seule couleur, OU segmentee traction (vert) / compression (rouge) avec
+  // interpolation exacte du point de passage a zero pour un changement de couleur net.
+  let tracePaths;
+  if (colorBySign) {
+    tracePaths = [];
+    for (let i = 0; i < data.length - 1; i++) {
+      const v0 = data[i][yKey], v1 = data[i + 1][yKey];
+      const x0 = xScale(data[i][xKey]), x1 = xScale(data[i + 1][xKey]);
+      const y0 = yScale(v0), y1 = yScale(v1);
+      const c0 = v0 >= 0 ? positiveColor : negativeColor;
+      if ((v0 >= 0) === (v1 >= 0)) {
+        tracePaths.push({ d: 'M ' + x0 + ' ' + y0 + ' L ' + x1 + ' ' + y1, color: c0 });
+      } else {
+        const t = v0 / (v0 - v1);
+        const xm = x0 + t * (x1 - x0), ym = yScale(0);
+        tracePaths.push({ d: 'M ' + x0 + ' ' + y0 + ' L ' + xm + ' ' + ym, color: c0 });
+        tracePaths.push({ d: 'M ' + xm + ' ' + ym + ' L ' + x1 + ' ' + y1, color: v1 >= 0 ? positiveColor : negativeColor });
+      }
+    }
+  } else {
+    tracePaths = [{ d: data.map((d, i) => (i === 0 ? 'M' : 'L') + ' ' + xScale(d[xKey]).toFixed(1) + ' ' + yScale(d[yKey]).toFixed(1)).join(' '), color: color }];
+  }
+
+  const yTicksCount = compact ? 4 : 6;
+  const ticks = [];
+  for (let i = 0; i <= yTicksCount; i++) ticks.push(yDomain[0] + (i * (yDomain[1] - yDomain[0])) / yTicksCount);
+  const tickFont = compact ? '9' : '11';
+
+  const gridLines = ticks.map((t, i) => e('g', { key: 'tick' + i },
+    e('line', { x1: 0, x2: innerW, y1: yScale(t), y2: yScale(t), stroke: '#1E2A42' }),
+    e('text', { x: -6, y: yScale(t), textAnchor: 'end', dominantBaseline: 'middle', fontSize: tickFont, fill: '#6C7C9C' }, t.toFixed(0))
+  ));
+
+  const refY = refLinesY.map((rl, i) => e('g', { key: 'ry' + i },
+    e('line', { x1: 0, x2: innerW, y1: yScale(rl.value), y2: yScale(rl.value), stroke: rl.color, strokeDasharray: '4 3' }),
+    compact ? null : e('text', { x: innerW, y: yScale(rl.value) - 4, textAnchor: 'end', fontSize: '10', fill: rl.color }, rl.label)
+  ));
+
+  // Etiquettes des reperes verticaux (Debut Pont, Appuis, AD, Zone attaches...) : elles peuvent
+  // etre proches en X (ex. Appui 1 = Debut Pont) et se chevauchaient toutes au meme niveau Y.
+  // On les etage sur 3 rangees en alternance pour degager la lecture.
+  const refX = refLinesX.map((rl, i) => e('g', { key: 'rx' + i },
+    e('line', { x1: xScale(rl.value), x2: xScale(rl.value), y1: 0, y2: innerH, stroke: '#3A4A66' }),
+    compact ? null : e('text', { x: xScale(rl.value) + 4, y: 10 + (i % 3) * 12, fontSize: '10', fill: '#6C7C9C' }, rl.label)
+  ));
+
+  return e('svg', { viewBox: '0 0 ' + width + ' ' + height, width: width, height: height },
+    e('g', { transform: 'translate(' + margin.left + ',' + margin.top + ')' },
+      gridLines, refY, refX,
+      tracePaths.map((p, i) => e('path', { key: 'trace' + i, d: p.d, fill: 'none', stroke: p.color, strokeWidth: '2' })),
+      e('line', { x1: 0, x2: innerW, y1: innerH, y2: innerH, stroke: '#3A4A66' }),
+      e('text', { x: 0, y: innerH + (compact ? 16 : 20), textAnchor: 'start', fontSize: tickFont, fill: '#8593AD' }, xDomain[0].toFixed(0) + ' m'),
+      e('text', { x: innerW, y: innerH + (compact ? 16 : 20), textAnchor: 'end', fontSize: tickFont, fill: '#8593AD' }, xDomain[1].toFixed(0) + ' m')
+    )
+  );
+}
+
+function BarChartSVG(props) {
+  const data = props.data, xKey = props.xKey, yKey = props.yKey, yDomain = props.yDomain, color = props.color;
+  const refLinesY = props.refLinesY || [], refLinesX = props.refLinesX || [];
+  const width = props.width || 900, height = props.height || 240;
+  const compact = width < 480;
+  const margin = compact ? { top: 16, right: 10, bottom: 20, left: 34 } : { top: 20, right: 20, bottom: 30, left: 50 };
+  const innerW = width - margin.left - margin.right;
+  const innerH = height - margin.top - margin.bottom;
+  if (!data.length) return null;
+
+  const xDomain = [data[0][xKey], data[data.length - 1][xKey]];
+  const xScale = scaleLinear(xDomain, [0, innerW]);
+  const yScale = scaleLinear(yDomain, [innerH, 0]);
+  const barW = Math.max(1.5, innerW / data.length - 1);
+  const tickFont = compact ? '9' : '11';
+
+  const ticks = [];
+  for (let i = 0; i <= 4; i++) ticks.push(yDomain[0] + (i * (yDomain[1] - yDomain[0])) / 4);
+  const gridLines = ticks.map((t, i) => e('g', { key: 'tick' + i },
+    e('line', { x1: 0, x2: innerW, y1: yScale(t), y2: yScale(t), stroke: '#1E2A42' }),
+    e('text', { x: -6, y: yScale(t), textAnchor: 'end', dominantBaseline: 'middle', fontSize: tickFont, fill: '#6C7C9C' }, t.toFixed(1))
+  ));
+
+  const refY = refLinesY.map((rl, i) => e('g', { key: 'ry' + i },
+    e('line', { x1: 0, x2: innerW, y1: yScale(rl.value), y2: yScale(rl.value), stroke: rl.color, strokeDasharray: '4 3' }),
+    compact ? null : e('text', { x: innerW, y: yScale(rl.value) - 4, textAnchor: 'end', fontSize: '10', fill: rl.color }, rl.label)
+  ));
+
+  const refX = refLinesX.map((rl, i) => e('line', { key: 'rx' + i, x1: xScale(rl.value), x2: xScale(rl.value), y1: 0, y2: innerH, stroke: '#3A4A66' }));
+
+  const bars = data.map((d, i) => e('rect', {
+    key: 'bar' + i,
+    x: xScale(d[xKey]) - barW / 2,
+    y: yScale(d[yKey]),
+    width: barW,
+    height: innerH - yScale(d[yKey]),
+    fill: color
+  }));
+
+  return e('svg', { viewBox: '0 0 ' + width + ' ' + height, width: width, height: height },
+    e('g', { transform: 'translate(' + margin.left + ',' + margin.top + ')' },
+      gridLines, refY, refX, bars,
+      e('line', { x1: 0, x2: innerW, y1: innerH, y2: innerH, stroke: '#3A4A66' }),
+      e('text', { x: 0, y: innerH + (compact ? 14 : 18), textAnchor: 'start', fontSize: tickFont, fill: '#8593AD' }, xDomain[0].toFixed(0) + ' m'),
+      e('text', { x: innerW, y: innerH + (compact ? 14 : 18), textAnchor: 'end', fontSize: tickFont, fill: '#8593AD' }, xDomain[1].toFixed(0) + ' m')
+    )
+  );
+}
+
+function MultiLineChartSVG(props) {
+  const data = props.data, xKey = props.xKey, series = props.series || [];
+  const yDomain = props.yDomain;
+  const refLinesY = props.refLinesY || [], refLinesX = props.refLinesX || [];
+  const width = props.width || 900, height = props.height || 280;
+  const compact = width < 480;
+  const margin = compact ? { top: 16, right: 10, bottom: 24, left: 34 } : { top: 20, right: 20, bottom: 30, left: 50 };
+  const innerW = width - margin.left - margin.right;
+  const innerH = height - margin.top - margin.bottom;
+  if (!data.length) return null;
+
+  const xDomain = [data[0][xKey], data[data.length - 1][xKey]];
+  const xScale = scaleLinear(xDomain, [0, innerW]);
+  const yScale = scaleLinear(yDomain, [innerH, 0]);
+  const tickFont = compact ? '9' : '11';
+
+  const yTicksCount = compact ? 4 : 6;
+  const ticks = [];
+  for (let i = 0; i <= yTicksCount; i++) ticks.push(yDomain[0] + (i * (yDomain[1] - yDomain[0])) / yTicksCount);
+
+  const gridLines = ticks.map((t, i) => e('g', { key: 'tick' + i },
+    e('line', { x1: 0, x2: innerW, y1: yScale(t), y2: yScale(t), stroke: '#1E2A42' }),
+    e('text', { x: -6, y: yScale(t), textAnchor: 'end', dominantBaseline: 'middle', fontSize: tickFont, fill: '#6C7C9C' }, t.toFixed(1))
+  ));
+
+  const refY = refLinesY.map((rl, i) => e('g', { key: 'ry' + i },
+    e('line', { x1: 0, x2: innerW, y1: yScale(rl.value), y2: yScale(rl.value), stroke: rl.color, strokeDasharray: '4 3' }),
+    compact ? null : e('text', { x: innerW, y: yScale(rl.value) - 4, textAnchor: 'end', fontSize: '10', fill: rl.color }, rl.label)
+  ));
+
+  const refX = refLinesX.map((rl, i) => e('g', { key: 'rx' + i },
+    e('line', { x1: xScale(rl.value), x2: xScale(rl.value), y1: 0, y2: innerH, stroke: '#3A4A66' }),
+    compact ? null : e('text', { x: xScale(rl.value) + 4, y: 10 + (i % 3) * 12, fontSize: '10', fill: '#6C7C9C' }, rl.label || '')
+  ));
+
+  const paths = series.map((s, si) => {
+    const path = data.map((d, i) => (i === 0 ? 'M' : 'L') + ' ' + xScale(d[xKey]).toFixed(1) + ' ' + yScale(d[s.yKey]).toFixed(1)).join(' ');
+    return e('path', { key: 'series' + si, d: path, fill: 'none', stroke: s.color, strokeWidth: '2' });
+  });
+
+  const legendGap = compact ? 70 : 150;
+  const legend = e('g', { transform: 'translate(0,-6)' }, series.map((s, si) =>
+    e('g', { key: 'leg' + si, transform: 'translate(' + (si * legendGap) + ',0)' },
+      e('line', { x1: 0, x2: 14, y1: -8, y2: -8, stroke: s.color, strokeWidth: '2' }),
+      e('text', { x: 18, y: -4, fontSize: tickFont, fill: '#C6D2E6' }, s.label)
+    )
+  ));
+
+  return e('svg', { viewBox: '0 0 ' + width + ' ' + height, width: width, height: height },
+    e('g', { transform: 'translate(' + margin.left + ',' + margin.top + ')' },
+      gridLines, refY, refX, paths,
+      e('line', { x1: 0, x2: innerW, y1: innerH, y2: innerH, stroke: '#3A4A66' }),
+      e('text', { x: 0, y: innerH + (compact ? 16 : 20), textAnchor: 'start', fontSize: tickFont, fill: '#8593AD' }, xDomain[0].toFixed(0) + ' m'),
+      e('text', { x: innerW, y: innerH + (compact ? 16 : 20), textAnchor: 'end', fontSize: tickFont, fill: '#8593AD' }, xDomain[1].toFixed(0) + ' m'),
+      legend
+    )
+  );
+}
+
+// ==========================================
+// 3. CONFIGURATION DE BASE
+// ==========================================
+
+const baseConfig = {
+  materials: {
+    railSteel: { E_MPa: 210000, alpha: 0.000012 },
+    deckConcrete: { E_MPa: 35000, alpha: 0.000010 }
+  },
+  track: {
+    profile: "60E1", area_mm2: 15340, anchorageLength_m: 100,
+    uicResistance: {
+      // Voie non chargee (hors emprise du convoi). u_limit (seuil elastique->plastique)
+      // n'est pas un parametre independant : il vaut f_max / k_lin (coude de la loi bilineaire).
+      unloaded: { k_lin_kN_mm_m: 20, f_max_kN_m: 20 },
+      // Voie chargee : la charge verticale du train (LM71) plaque le ballast et
+      // majore fortement la resistance longitudinale plastique (UIC 774-3, retour d'experience ~x3)
+      loaded: { k_lin_kN_mm_m: 20, f_max_kN_m: 60 }
+    }
+  },
+  meshSettings: { elementLength_m: 2.0 }
+};
+
+// Configuration par defaut du tablier : plusieurs travees avec appuis intermediaires,
+// modifiable dynamiquement depuis l'interface (ajout/suppression de travees et d'appuis).
+const defaultSpans = [
+  { id: 1, length_m: 40, area_mm2: 5000000 },
+  { id: 2, length_m: 50, area_mm2: 5000000 },
+  { id: 3, length_m: 40, area_mm2: 5000000 }
+];
+const defaultSupports = [
+  { id: 1, type: "fixed" },
+  { id: 2, type: "elastic", stiffness_kN_mm: 400 },
+  { id: 3, type: "elastic", stiffness_kN_mm: 400 },
+  { id: 4, type: "sliding" }
+];
+
+// ==========================================
+// 4. COMPOSANT REACT PRINCIPAL
+// ==========================================
+
+function IvoDashboard() {
+  const [deltaTDeck, setDeltaTDeck] = useState(35);
+  const [deltaTRail, setDeltaTRail] = useState(50);
+  const [hasTraffic, setHasTraffic] = useState(false);
+  const [hasSettlement, setHasSettlement] = useState(false);
+  // Reference par id (stable), pas par index : l'index d'un appui peut changer quand on
+  // ajoute/supprime une travee, ce qui appliquerait silencieusement le tassement au mauvais appui.
+  const [settlementSupportId, setSettlementSupportId] = useState(defaultSupports[0].id);
+  const [settlementMm, setSettlementMm] = useState(10);
+
+  // Travees et appuis du tablier : structure multi-travees, modifiable dynamiquement
+  const [spans, setSpans] = useState(defaultSpans.map(s => Object.assign({}, s)));
+  const [supports, setSupports] = useState(defaultSupports.map(s => Object.assign({}, s)));
+
+  // Appareil de dilatation (AD) : coupure locale de la continuite du rail
+  const [hasExpansionDevice, setHasExpansionDevice] = useState(false);
+  const [expansionDevicePos, setExpansionDevicePos] = useState(230); // suggestion : fin de pont par defaut
+  const [adCapacityMm, setAdCapacityMm] = useState(150); // debattement admissible typique d'un AD simple
+
+  // Zone de raideur d'attaches personnalisee (attaches speciales / patins / transition)
+  const [hasFasteningZone, setHasFasteningZone] = useState(false);
+  const [fasteningZoneStart, setFasteningZoneStart] = useState(140);
+  const [fasteningZoneEnd, setFasteningZoneEnd] = useState(160);
+  const [fasteningKLin, setFasteningKLin] = useState(10);
+  const [fasteningFMax, setFasteningFMax] = useState(12);
+
+  // Synthese IA (optionnelle) : appelle UNE FONCTION SERVEUR (Cloud Function / Cloud Run) que
+  // vous deployez vous-meme et qui detient la cle API Anthropic cote serveur. Ce fichier ne
+  // contient et ne doit jamais contenir de cle API : toute cle presente dans du JS execute par
+  // le navigateur est visible par quiconque ouvre les outils de dev, quelle que soit l'obfuscation.
+  const [aiEndpoint, setAiEndpoint] = useState(() => {
+    try { return localStorage.getItem('ivo_ai_endpoint') || ''; } catch (err) { return ''; }
+  });
+  const [aiLoading, setAiLoading] = useState(false);
+  const [aiSynthesis, setAiSynthesis] = useState('');
+  const [aiError, setAiError] = useState('');
+
+  function updateAiEndpoint(url) {
+    setAiEndpoint(url);
+    try { localStorage.setItem('ivo_ai_endpoint', url); } catch (err) { /* stockage indisponible, tant pis */ }
+  }
+
+  // Mesure de la largeur reelle de chaque graphique (responsive mobile <-> desktop)
+  const [chart1Ref, chart1Width] = useMeasuredWidth(900);
+  const [chart2Ref, chart2Width] = useMeasuredWidth(900);
+  const [chart3Ref, chart3Width] = useMeasuredWidth(900);
+
+  function addSpan() {
+    setSpans(prev => [...prev, { id: nextUid(), length_m: 30, area_mm2: 5000000 }]);
+    setSupports(prev => {
+      const next = prev.slice();
+      next.splice(prev.length - 1, 0, { id: nextUid(), type: 'elastic', stiffness_kN_mm: 400 });
+      return next;
+    });
+  }
+  function removeSpan(idx) {
+    if (spans.length <= 1) return;
+    setSpans(prev => prev.filter((_, i) => i !== idx));
+    setSupports(prev => {
+      const removeIndex = idx === 0 ? 1 : idx;
+      const next = prev.filter((_, i) => i !== removeIndex);
+      if (!next.some(s => s.id === settlementSupportId)) setSettlementSupportId(next[0].id);
+      return next;
+    });
+  }
+  function updateSpan(idx, field, value) {
+    setSpans(prev => prev.map((s, i) => i === idx ? Object.assign({}, s, { [field]: value }) : s));
+  }
+  function updateSupportType(idx, type) {
+    setSupports(prev => prev.map((s, i) => i === idx ? Object.assign({}, s, { type }) : s));
+  }
+  function updateSupportStiffness(idx, value) {
+    setSupports(prev => prev.map((s, i) => i === idx ? Object.assign({}, s, { stiffness_kN_mm: value }) : s));
+  }
+
+  // Positions cumulees des appuis a partir des longueurs de travee (appui 0 en debut de pont)
+  const supportPositions = useMemo(() => {
+    let acc = 0;
+    const positions = [0];
+    for (const span of spans) { acc += span.length_m; positions.push(acc); }
+    return positions;
+  }, [spans]);
+  const totalBridgeLength = supportPositions[supportPositions.length - 1];
+
+  const result = useMemo(() => {
+    let config = JSON.parse(JSON.stringify(baseConfig));
+    config.loadCases = { thermal: { deltaT_deck_C: deltaTDeck, deltaT_rail_C: deltaTRail } };
+    if (hasTraffic) {
+      config.loadCases.traffic = { model: "LM71", startPosition_m: 0, length_m: totalBridgeLength, brakingForce_kN_m: 20 };
+    }
+    config.bridge = {
+      spans: spans.map(s => ({ id: s.id, length_m: s.length_m, area_mm2: s.area_mm2 })),
+      supports: supports.map((s, i) => {
+        const settlement = (hasSettlement && s.id === settlementSupportId) ? settlementMm : 0;
+        return {
+          position_m: supportPositions[i],
+          type: s.type,
+          stiffness_kN_mm: s.stiffness_kN_mm,
+          settlement_mm: settlement
+        };
+      })
+    };
+
+    config.track.fasteningZone = {
+      enabled: hasFasteningZone,
+      xStart_m: fasteningZoneStart,
+      xEnd_m: fasteningZoneEnd,
+      k_lin_kN_mm_m: fasteningKLin,
+      f_max_kN_m: fasteningFMax
+    };
+    config.track.expansionDevice = { enabled: hasExpansionDevice, position_m: expansionDevicePos };
+
+    const mesher = new Mesher(config);
+    mesher.generate();
+    const solver = new Solver(mesher, config);
+    solver.solve();
+    const processor = new PostProcessor(solver);
+    const r = processor.getResults();
+    return { data: r.graphData, converged: r.converged, iterations: r.iterations, adDebattement: r.adDebattement };
+  }, [deltaTDeck, deltaTRail, hasTraffic, hasSettlement, settlementSupportId, settlementMm, spans, supports, supportPositions, totalBridgeLength,
+      hasFasteningZone, fasteningZoneStart, fasteningZoneEnd, fasteningKLin, fasteningFMax, hasExpansionDevice, expansionDevicePos]);
+
+  const data = result.data, converged = result.converged, iterations = result.iterations;
+  const adDebattement = result.adDebattement;
+  const maxTraction = Math.max.apply(null, data.map(d => d.contrainte));
+  const maxCompression = Math.min.apply(null, data.map(d => d.contrainte));
+  const maxGlissement = Math.max.apply(null, data.map(d => d.glissement));
+  const maxRespiration = Math.max.apply(null, data.map(d => Math.abs(d.deplRail)));
+
+  const L_ancrage = baseConfig.track.anchorageLength_m;
+  const pontDebut = L_ancrage, pontFin = L_ancrage + totalBridgeLength;
+  const supportRefLinesX = supportPositions.map((p, i) => ({
+    value: pontDebut + p,
+    label: 'Appui ' + (i + 1)
+  }));
+  const adRefLinesX = hasExpansionDevice ? [{ value: expansionDevicePos, label: 'AD' }] : [];
+  const fastZoneRefLinesX = hasFasteningZone ? [
+    { value: fasteningZoneStart, label: 'Zone attaches' },
+    { value: fasteningZoneEnd, label: '' }
+  ] : [];
+
+  // Construit un resume compact (pas les 100+ points du graphe) de la configuration et des
+  // resultats, envoye a la fonction serveur pour generer une synthese d'audit en langage clair.
+  async function generateAISynthesis() {
+    if (!aiEndpoint) return;
+    setAiLoading(true); setAiError(''); setAiSynthesis('');
+    const payload = {
+      hypotheses: {
+        deltaT_tablier_C: deltaTDeck, deltaT_rail_C: deltaTRail,
+        charge_train_LM71: hasTraffic,
+        denivellation_appui: hasSettlement ? { appui: supports.find(s => s.id === settlementSupportId), tassement_mm: settlementMm } : null,
+        appareil_dilatation: hasExpansionDevice ? { position_m: expansionDevicePos, debattement_admissible_mm: adCapacityMm } : null,
+        zone_attaches_modifiee: hasFasteningZone ? { de_m: fasteningZoneStart, a_m: fasteningZoneEnd, k_lin_kN_mm_m: fasteningKLin, f_max_kN_m: fasteningFMax } : null
+      },
+      structure: { travees: spans, appuis: supports, longueur_totale_m: totalBridgeLength },
+      resultats: {
+        convergence: converged, iterations: iterations,
+        contrainte_max_traction_MPa: maxTraction, contrainte_max_compression_MPa: maxCompression,
+        glissement_max_mm: maxGlissement, respiration_rail_max_mm: maxRespiration,
+        debattement_AD_mm: adDebattement
+      },
+      seuils_reference: { traction_MPa: 92, compression_MPa: -92, glissement_mm: 4 }
+    };
+    try {
+      const res = await fetch(aiEndpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      const json = await res.json();
+      setAiSynthesis(json.text || JSON.stringify(json));
+    } catch (err) {
+      setAiError("Echec de l'appel : " + err.message + ". Verifiez l'URL de la fonction et sa configuration CORS.");
+    } finally {
+      setAiLoading(false);
+    }
+  }
+
+  const statusBadge = e('div', {
+    className: 'flex items-center gap-2 text-xs font-medium px-2.5 py-1 rounded-full mono-num self-start ' +
+      (converged ? 'bg-[#0F2E2A] text-[#3DDC97]' : 'bg-[#3A2712] text-[#FFA94D]')
+  },
+    e('span', { className: 'status-dot inline-block w-1.5 h-1.5 rounded-full', style: { background: 'currentColor' } }),
+    (converged ? ('CONVERGE \u2014 ' + iterations + ' ITER.') : ('NON CONVERGE \u2014 ' + iterations + ' ITER.'))
+  );
+
+  const header = e('div', { className: 'flex flex-row items-center justify-between mb-2 gap-2' },
+    e('div', { className: 'min-w-0' },
+      e('p', { className: 'eyebrow mb-0.5 truncate' }, 'UIC 774-3 \u00b7 EN 1992-2 \u00b7 Analyse non lineaire'),
+      e('h1', { className: 'font-display text-lg sm:text-2xl font-semibold tracking-tight text-[#E9EEF7] truncate' }, 'Audit Interaction Voie-Ouvrage')
+    ),
+    statusBadge
+  );
+
+  const configPanel = e('div', { className: 'panel p-3 space-y-2' },
+    e('p', { className: 'eyebrow' }, 'Cas de charge'),
+    e('div', { className: 'flex flex-wrap gap-3 sm:gap-6 items-center' },
+      e('div', { className: 'flex flex-col gap-2' },
+        e('label', { className: 'text-sm font-semibold text-[#93A3C2]' }, 'Delta T Tablier (C) : ', e('span', { className: 'mono-num' }, deltaTDeck)),
+        e('input', { type: 'range', min: '-30', max: '40', value: deltaTDeck, onChange: (ev) => setDeltaTDeck(Number(ev.target.value)), className: 'w-48' })
+      ),
+      e('div', { className: 'flex flex-col gap-2' },
+        e('label', { className: 'text-sm font-semibold text-[#93A3C2]' }, 'Delta T Rail (C) : ', e('span', { className: 'mono-num' }, deltaTRail)),
+        e('input', { type: 'range', min: '-30', max: '60', value: deltaTRail, onChange: (ev) => setDeltaTRail(Number(ev.target.value)), className: 'w-48' })
+      ),
+      e('div', { className: 'flex items-center gap-3' },
+        e('input', { type: 'checkbox', id: 'traffic', checked: hasTraffic, onChange: (ev) => setHasTraffic(ev.target.checked), className: 'accent-[#7FB3E8]' }),
+        e('label', { htmlFor: 'traffic', className: 'text-sm font-semibold text-[#C6D2E6] cursor-pointer' }, 'Charge Train LM71 (freinage + charge verticale)')
+      )
+    ),
+    e('div', { className: 'pt-2 border-t border-[#1E2A42] flex flex-wrap gap-3 sm:gap-6 items-center' },
+      e('div', { className: 'flex items-center gap-3' },
+        e('input', { type: 'checkbox', id: 'settlement', checked: hasSettlement, onChange: (ev) => setHasSettlement(ev.target.checked), className: 'accent-[#FFA94D]' }),
+        e('label', { htmlFor: 'settlement', className: 'text-sm font-semibold text-[#C6D2E6] cursor-pointer' }, "Denivellation d'appui")
+      ),
+      hasSettlement ? e('div', { className: 'flex flex-col gap-2' },
+        e('label', { className: 'text-sm font-semibold text-[#93A3C2]' }, 'Appui concerne'),
+        e('select', {
+          value: settlementSupportId,
+          onChange: (ev) => setSettlementSupportId(Number(ev.target.value)),
+          className: 'border border-[#2A3B57] rounded px-2 py-1 text-sm'
+        }, supports.map((s, i) => e('option', { key: s.id, value: s.id },
+          'Appui ' + (i + 1) + ' (' + supportPositions[i] + ' m, ' + (s.type === 'fixed' ? 'fixe' : s.type === 'sliding' ? 'mobile' : 'elastique') + ')'
+        )))
+      ) : null,
+      hasSettlement ? e('div', { className: 'flex flex-col gap-2' },
+        e('label', { className: 'text-sm font-semibold text-[#93A3C2]' }, 'Tassement (mm) : ', e('span', { className: 'mono-num' }, settlementMm)),
+        e('input', { type: 'range', min: '-30', max: '30', value: settlementMm, onChange: (ev) => setSettlementMm(Number(ev.target.value)), className: 'w-48' })
+      ) : null
+    ),
+    e('div', { className: 'pt-2 border-t border-[#1E2A42] flex flex-wrap gap-3 sm:gap-6 items-center' },
+      e('div', { className: 'flex items-center gap-3' },
+        e('input', { type: 'checkbox', id: 'expdev', checked: hasExpansionDevice, onChange: (ev) => setHasExpansionDevice(ev.target.checked), className: 'accent-[#3DDC97]' }),
+        e('label', { htmlFor: 'expdev', className: 'text-sm font-semibold text-[#C6D2E6] cursor-pointer' }, "Appareil de dilatation (AD)")
+      ),
+      hasExpansionDevice ? e('div', { className: 'flex flex-col gap-2' },
+        e('label', { className: 'text-sm font-semibold text-[#93A3C2]' }, 'Position (m, repere modele) : ', e('span', { className: 'mono-num' }, expansionDevicePos)),
+        e('input', {
+          type: 'number', step: '1', value: expansionDevicePos,
+          onChange: (ev) => setExpansionDevicePos(Number(ev.target.value)),
+          className: 'w-24 border border-[#2A3B57] rounded px-2 py-1 text-sm'
+        }),
+        e('span', { className: 'text-xs text-[#5C6B87]' },
+          '= ' + (expansionDevicePos - pontDebut) + ' m depuis origine tablier'
+        ),
+        (expansionDevicePos < 0 || expansionDevicePos > pontFin + L_ancrage) ? e('span', { className: 'text-xs text-[#FFA94D]' },
+          '\u26a0 Position hors du modele (0 \u2013 ' + (pontFin + L_ancrage) + ' m)'
+        ) : null
+      ) : null,
+      hasExpansionDevice ? e('div', { className: 'flex flex-col gap-2' },
+        e('label', { className: 'text-sm font-semibold text-[#93A3C2]' }, "Debattement admissible (mm)"),
+        e('input', {
+          type: 'number', step: '10', value: adCapacityMm,
+          onChange: (ev) => setAdCapacityMm(Number(ev.target.value)),
+          className: 'w-24 border border-[#2A3B57] rounded px-2 py-1 text-sm'
+        })
+      ) : null
+    ),
+    e('div', { className: 'pt-2 border-t border-[#1E2A42] flex flex-wrap gap-3 sm:gap-6 items-center' },
+      e('div', { className: 'flex items-center gap-3' },
+        e('input', { type: 'checkbox', id: 'fastzone', checked: hasFasteningZone, onChange: (ev) => setHasFasteningZone(ev.target.checked), className: 'accent-[#B79CFB]' }),
+        e('label', { htmlFor: 'fastzone', className: 'text-sm font-semibold text-[#C6D2E6] cursor-pointer' }, "Zone d'attaches a raideur modifiee")
+      ),
+      hasFasteningZone ? e('div', { className: 'flex items-center gap-2 text-sm flex-wrap' },
+        e('label', { className: 'text-[#93A3C2]' }, 'de'),
+        e('input', { type: 'number', step: '1', value: fasteningZoneStart, onChange: (ev) => setFasteningZoneStart(Number(ev.target.value)), className: 'w-20 border border-[#2A3B57] rounded px-2 py-1' }),
+        e('label', { className: 'text-[#93A3C2]' }, 'a'),
+        e('input', { type: 'number', step: '1', value: fasteningZoneEnd, onChange: (ev) => setFasteningZoneEnd(Number(ev.target.value)), className: 'w-20 border border-[#2A3B57] rounded px-2 py-1' }),
+        e('span', { className: 'text-[#8593AD]' }, 'm (repere modele)')
+      ) : null,
+      hasFasteningZone ? e('div', { className: 'flex flex-col gap-2' },
+        e('label', { className: 'text-sm font-semibold text-[#93A3C2]' }, 'k_lin (kN/mm/m) : ', e('span', { className: 'mono-num' }, fasteningKLin)),
+        e('input', { type: 'range', min: '1', max: '40', value: fasteningKLin, onChange: (ev) => setFasteningKLin(Number(ev.target.value)), className: 'w-40' })
+      ) : null,
+      hasFasteningZone ? e('div', { className: 'flex flex-col gap-2' },
+        e('label', { className: 'text-sm font-semibold text-[#93A3C2]' }, 'f_max (kN/m) : ', e('span', { className: 'mono-num' }, fasteningFMax)),
+        e('input', { type: 'range', min: '1', max: '60', value: fasteningFMax, onChange: (ev) => setFasteningFMax(Number(ev.target.value)), className: 'w-40' })
+      ) : null
+    )
+  );
+
+  // Panneau de configuration du tablier multi-travees : travees (longueur, section) et appuis (type, raideur)
+  // Sur mobile : grille 2 colonnes (empilement lisible). A partir de sm : grille 12 colonnes (alignement en tableau).
+  const spanRows = spans.map((s, i) => e('div', {
+    key: s.id,
+    className: 'grid grid-cols-2 sm:grid-cols-12 gap-1.5 items-center text-sm pb-2 mb-2 border-b border-[#1E2A42] sm:pb-0 sm:mb-0 sm:border-0'
+  },
+    e('div', { className: 'col-span-2 sm:col-span-1 font-semibold text-[#8593AD]' }, 'T' + (i + 1)),
+    e('div', { className: 'col-span-1 sm:col-span-4 flex items-center gap-2' },
+      e('input', {
+        type: 'number', min: '1', step: '1', value: s.length_m,
+        onChange: (ev) => updateSpan(i, 'length_m', Number(ev.target.value)),
+        className: 'w-16 sm:w-20 border border-[#2A3B57] rounded px-2 py-1 min-w-0'
+      }),
+      e('span', { className: 'text-[#8593AD]' }, 'm')
+    ),
+    e('div', { className: 'col-span-1 sm:col-span-4 flex items-center gap-2' },
+      e('input', {
+        type: 'number', min: '1', step: '100000', value: s.area_mm2,
+        onChange: (ev) => updateSpan(i, 'area_mm2', Number(ev.target.value)),
+        className: 'w-20 sm:w-28 border border-[#2A3B57] rounded px-2 py-1 min-w-0'
+      }),
+      e('span', { className: 'text-[#8593AD]' }, 'mm\u00b2')
+    ),
+    e('div', { className: 'col-span-2 sm:col-span-3' },
+      spans.length > 1 ? e('button', {
+        onClick: () => removeSpan(i),
+        className: 'text-[#FF6B4A] hover:text-[#FF8F73] text-xs font-semibold px-2 py-1 rounded border border-[#5C2A22] hover:bg-[#3A1712]'
+      }, 'Supprimer') : null
+    )
+  ));
+
+  const supportRows = supports.map((s, i) => e('div', {
+    key: s.id,
+    className: 'grid grid-cols-2 sm:grid-cols-12 gap-1.5 items-center text-sm pb-2 mb-2 border-b border-[#1E2A42] sm:pb-0 sm:mb-0 sm:border-0'
+  },
+    e('div', { className: 'col-span-2 sm:col-span-1 font-semibold text-[#8593AD]' }, 'A' + (i + 1)),
+    e('div', { className: 'col-span-1 sm:col-span-2 text-[#8593AD]' }, supportPositions[i] + ' m'),
+    e('div', { className: 'col-span-1 sm:col-span-4' },
+      e('select', {
+        value: s.type,
+        onChange: (ev) => updateSupportType(i, ev.target.value),
+        className: 'border border-[#2A3B57] rounded px-2 py-1 w-full'
+      },
+        e('option', { value: 'fixed' }, 'Fixe'),
+        e('option', { value: 'sliding' }, 'Mobile (libre)'),
+        e('option', { value: 'elastic' }, 'Elastique (pile)')
+      )
+    ),
+    s.type === 'elastic' ? e('div', { className: 'col-span-2 sm:col-span-5 flex items-center gap-2' },
+      e('input', {
+        type: 'number', min: '1', step: '10', value: s.stiffness_kN_mm || 400,
+        onChange: (ev) => updateSupportStiffness(i, Number(ev.target.value)),
+        className: 'w-24 border border-[#2A3B57] rounded px-2 py-1 min-w-0'
+      }),
+      e('span', { className: 'text-[#8593AD]' }, 'kN/mm')
+    ) : e('div', { className: 'hidden sm:block sm:col-span-5' })
+  ));
+
+  const totalTrackLength = 2 * L_ancrage + totalBridgeLength;
+
+  const bridgePanel = e('div', { className: 'panel p-3 space-y-2' },
+    e('p', { className: 'eyebrow' }, 'Geometrie'),
+    e('div', { className: 'flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3' },
+      e('h2', { className: 'font-display text-base font-semibold tracking-tight text-[#C6D2E6]' }, 'Structure du Tablier (Multi-Travees) \u2014 Longueur totale : ' + totalBridgeLength + ' m'),
+      e('button', {
+        onClick: addSpan,
+        className: 'text-sm font-semibold px-3 py-1.5 rounded bg-[#3D6690] text-[#EAF1FA] hover:bg-[#4A78A8] self-start sm:self-auto'
+      }, '+ Ajouter une travee')
+    ),
+    e('p', { className: 'mono-num text-xs text-[#8593AD]' },
+      'Longueur totale de voie modelisee : ' + L_ancrage + ' m (ancrage) + ' + totalBridgeLength + ' m (pont) + ' + L_ancrage + ' m (ancrage) = ' + totalTrackLength + ' m'
+    ),
+    e('div', { className: 'space-y-2' },
+      e('div', { className: 'hidden sm:grid sm:grid-cols-12 gap-2 text-xs font-semibold text-[#5C6B87] uppercase' },
+        e('div', { className: 'col-span-1' }, ''),
+        e('div', { className: 'col-span-4' }, 'Longueur'),
+        e('div', { className: 'col-span-4' }, 'Section beton'),
+        e('div', { className: 'col-span-3' }, '')
+      ),
+      spanRows
+    ),
+    e('div', { className: 'space-y-2 pt-3 border-t border-[#1E2A42]' },
+      e('div', { className: 'hidden sm:grid sm:grid-cols-12 gap-2 text-xs font-semibold text-[#5C6B87] uppercase' },
+        e('div', { className: 'col-span-1' }, ''),
+        e('div', { className: 'col-span-2' }, 'Position'),
+        e('div', { className: 'col-span-4' }, 'Type d\'appui'),
+        e('div', { className: 'col-span-5' }, 'Raideur (si elastique)')
+      ),
+      supportRows
+    )
+  );
+
+  function kpiCard(accentColor, iconText, label, value, danger) {
+    return e('div', {
+      className: 'panel p-2.5 sm:p-3 flex items-center gap-2 sm:gap-3 relative overflow-hidden min-w-0',
+      style: { borderLeft: '3px solid ' + (danger ? '#FF6B4A' : accentColor) }
+    },
+      e('div', {
+        className: 'w-7 h-7 sm:w-9 sm:h-9 flex items-center justify-center rounded-md text-sm sm:text-base flex-none',
+        style: { background: (danger ? '#3A1712' : accentColor + '22'), color: (danger ? '#FF6B4A' : accentColor) }
+      }, iconText),
+      e('div', { className: 'min-w-0' },
+        e('p', { className: 'eyebrow mb-0.5 truncate' }, label),
+        e('p', { className: 'mono-num text-lg sm:text-2xl font-semibold truncate ' + (danger ? 'text-[#FF6B4A]' : 'text-[#E9EEF7]') }, value)
+      )
+    );
+  }
+
+  const kpiList = [
+    kpiCard('#FF6B4A', '\u2193', 'Max Compression', maxCompression.toFixed(1) + ' MPa', maxCompression < -92),
+    kpiCard('#7FB3E8', '\u2194', 'Max Traction', maxTraction.toFixed(1) + ' MPa', maxTraction > 72),
+    kpiCard('#FFA94D', '\u2248', 'Glissement Max', maxGlissement.toFixed(2) + ' mm', maxGlissement > 4),
+    kpiCard('#B79CFB', '\u21c4', 'Respiration Rail Max', maxRespiration.toFixed(2) + ' mm', !hasExpansionDevice && maxRespiration > 5)
+  ];
+  if (hasExpansionDevice && adDebattement !== null) {
+    kpiList.push(kpiCard('#3DDC97', '\u2b0c', 'Debattement AD', adDebattement.toFixed(1) + ' / ' + adCapacityMm + ' mm', adDebattement > adCapacityMm));
+  }
+  const kpis = e('div', { className: 'grid grid-cols-2 md:grid-cols-4 xl:grid-cols-5 gap-2 sm:gap-3 mb-3' }, kpiList);
+
+  // Domaines d'axe Y recalcules automatiquement a partir des valeurs reelles (+ marge),
+  // en gardant les seuils reglementaires visibles pour le contexte.
+  const contrainteDomain = computeYDomain(data.map(d => d.contrainte), [92, -92], { symmetric: true });
+  const glissementDomain = computeYDomain(data.map(d => d.glissement), [4], { floorZero: true });
+  const respirationValues = data.map(d => d.deplRail).concat(data.map(d => d.deplTablier));
+  const respirationDomain = computeYDomain(respirationValues, [], { symmetric: true });
+
+  const chartRefLinesX = [{ value: pontDebut, label: 'Debut Pont' }, { value: pontFin, label: 'Fin Pont' }]
+    .concat(supportRefLinesX).concat(adRefLinesX).concat(fastZoneRefLinesX);
+
+  const scopeStyle = (h) => ({ height: h + 'px', background: '#0A1120', border: '1px solid #1E2A42', borderRadius: '10px', padding: '6px 4px 2px' });
+  // Hauteurs explicites (px) passees a la fois au SVG et a son conteneur : le SVG a une
+  // hauteur fixe (attribut height), donc le conteneur doit correspondre exactement, sinon
+  // le graphique deborde de sa boite et chevauche visuellement le bloc suivant.
+  const isCompactChart = chart1Width < 480;
+  const mainChartH = isCompactChart ? 210 : 250;
+  const slipChartH = isCompactChart ? 140 : 170;
+  const respChartH = isCompactChart ? 210 : 250;
+
+  const charts = e('div', { className: 'panel p-3 space-y-3' },
+    e('p', { className: 'eyebrow' }, 'Resultats'),
+    e('div', { className: 'w-full' },
+      e('h3', { className: 'font-display text-base font-semibold tracking-tight text-[#C6D2E6] mb-1' }, 'Contraintes Longitudinales dans le Rail (MPa)'),
+      e('p', { className: 'text-xs text-[#5C6B87] mb-1 flex items-center gap-4' },
+        e('span', null, e('span', { style: { color: '#3DDC97' } }, '\u25cf'), ' Traction'),
+        e('span', null, e('span', { style: { color: '#FF6B4A' } }, '\u25cf'), ' Compression')
+      ),
+      e('div', { ref: chart1Ref, style: scopeStyle(mainChartH) },
+        e(LineChartSVG, {
+          data: data, xKey: 'x', yKey: 'contrainte', yDomain: contrainteDomain, width: chart1Width, height: mainChartH,
+          colorBySign: true, positiveColor: '#3DDC97', negativeColor: '#FF6B4A',
+          refLinesY: [{ value: 92, color: '#FF6B4A', label: 'Limite Traction (92 MPa)' }, { value: -92, color: '#FF6B4A', label: 'Limite Compression (-92 MPa)' }],
+          refLinesX: chartRefLinesX
+        })
+      )
+    ),
+    e('div', { className: 'w-full' },
+      e('h3', { className: 'font-display text-base font-semibold tracking-tight text-[#C6D2E6] mb-1' }, 'Glissement Relatif Voie-Ouvrage (mm)'),
+      e('div', { ref: chart2Ref, style: scopeStyle(slipChartH) },
+        e(BarChartSVG, {
+          data: data, xKey: 'x', yKey: 'glissement', yDomain: glissementDomain, color: '#FFA94D', width: chart2Width, height: slipChartH,
+          refLinesY: [{ value: 4, color: '#FF6B4A', label: 'Limite Glissement (4 mm)' }],
+          refLinesX: chartRefLinesX
+        })
+      )
+    ),
+    e('div', { className: 'w-full' },
+      e('h3', { className: 'font-display text-base font-semibold tracking-tight text-[#C6D2E6] mb-1' }, "Respiration du Rail \u2014 Deplacement Longitudinal Absolu (mm)"),
+      e('p', { className: 'text-xs text-[#5C6B87] mb-1' },
+        "Deplacement du rail et du tablier par rapport au point fixe : c'est ce mouvement, non le seul glissement relatif, qui dimensionne l'appareil de dilatation en fin de zone d'ancrage."
+      ),
+      e('div', { ref: chart3Ref, style: scopeStyle(respChartH) },
+        e(MultiLineChartSVG, {
+          data: data, xKey: 'x', yDomain: respirationDomain, width: chart3Width, height: respChartH,
+          series: [
+            { yKey: 'deplRail', color: '#B79CFB', label: 'Rail' },
+            { yKey: 'deplTablier', color: '#3DDC97', label: 'Tablier' }
+          ],
+          refLinesX: chartRefLinesX
+        })
+      )
+    )
+  );
+
+  const footnote = e('p', { className: 'text-xs text-[#5C6B87] mt-4 text-center' },
+    "Modele 1D barres/ressorts non lineaire - UIC 774-3 (loi bilineaire voie, resistance chargee/non chargee selon " +
+    "l'emprise du convoi, zone d'attaches a raideur modifiable) & EN 1992-2 (rigidite tablier multi-travees, appuis " +
+    "fixes/mobiles/elastiques, appareil de dilatation). " +
+    "Combinaison freinage + charge verticale + thermique + denivellation resolue simultanement (non-linearite des ressorts)."
+  );
+
+  const aiPanel = e('div', { className: 'panel p-3 mt-3 space-y-2' },
+    e('p', { className: 'eyebrow' }, 'Synthese IA (optionnelle)'),
+    e('p', { className: 'text-xs text-[#5C6B87]' },
+      "Envoie un resume des hypotheses et resultats (pas les 100+ points de courbe) a une fonction " +
+      "serveur que vous deployez vous-meme (ex. Firebase Cloud Function) et qui detient la cle API " +
+      "cote serveur. Aucune cle API n'est jamais presente dans ce fichier ni dans le navigateur."
+    ),
+    e('div', { className: 'flex flex-col sm:flex-row gap-3 sm:items-center' },
+      e('input', {
+        type: 'text', value: aiEndpoint, placeholder: 'https://<region>-<projet>.cloudfunctions.net/ivoSynthese',
+        onChange: (ev) => updateAiEndpoint(ev.target.value),
+        className: 'flex-1 border border-[#2A3B57] rounded px-3 py-2 text-sm mono-num'
+      }),
+      e('button', {
+        onClick: generateAISynthesis,
+        disabled: !aiEndpoint || aiLoading,
+        className: 'text-sm font-semibold px-4 py-2 rounded bg-[#3D6690] text-[#EAF1FA] hover:bg-[#4A78A8] disabled:opacity-40 disabled:cursor-not-allowed whitespace-nowrap'
+      }, aiLoading ? 'Generation...' : 'Generer la synthese')
+    ),
+    aiError ? e('p', { className: 'text-sm text-[#FF6B4A]' }, aiError) : null,
+    aiSynthesis ? e('div', { className: 'text-sm text-[#C6D2E6] whitespace-pre-wrap leading-relaxed border-t border-[#1E2A42] pt-4' }, aiSynthesis) : null
+  );
+
+  return e('div', { className: 'app-shell' },
+    e('div', { className: 'px-3 sm:px-5 pt-2 sm:pt-3 w-full flex-none' }, header),
+    e('div', { className: 'pane-scroll flex-none px-3 sm:px-5 w-full grid grid-cols-1 lg:grid-cols-2 gap-2 sm:gap-3', style: { maxHeight: '30vh' } },
+      bridgePanel, configPanel
+    ),
+    e('div', { className: 'pane-scroll flex-1 px-3 sm:px-5 pb-3 sm:pb-4 pt-2 w-full' },
+      kpis, charts, aiPanel, footnote
+    )
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(e(IvoDashboard));
+</script>
+</body>
+</html>
