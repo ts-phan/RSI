@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>Audit Interaction Voie-Ouvrage — UIC 774-3 / EN 1992-2</title>
+<title>Interaction Voie-Ouvrage — UIC 774-3 / EN 1992-2</title>
 <script src="https://cdn.tailwindcss.com"></script>
 <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
 <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
@@ -193,6 +193,13 @@ class Mesher {
     const fzStartX = fzActive ? fz.xStart_m * 1000 : null;
     const fzEndX = fzActive ? fz.xEnd_m * 1000 : null;
 
+    // Zone d'appareil de voie (aiguillage) : meme mecanisme que la zone d'attaches, prioritaire
+    // en cas de recouvrement (un aiguillage impose ses propres attaches, quel que soit le contexte).
+    const sz = this.data.track.switchZone;
+    const szActive = sz && sz.enabled;
+    const szStartX = szActive ? sz.xStart_m * 1000 : null;
+    const szEndX = szActive ? sz.xEnd_m * 1000 : null;
+
     // Appareil de dilatation (AD) : coupure quasi-totale de la continuite du RAIL a une position
     // donnee (le rail peut coulisser librement dans l'appareil, qui ne transmet quasiment aucun effort).
     const ad = this.data.track.expansionDevice;
@@ -231,8 +238,9 @@ class Mesher {
       const sousCharge = traffic && x_mid >= trafficStartX && x_mid <= trafficEndX;
       const uic = sousCharge ? uicLoaded : uicUnloaded;
       const inFasteningZone = fzActive && x_mid >= fzStartX && x_mid <= fzEndX;
-      const k_lin_kN_mm_m = inFasteningZone ? fz.k_lin_kN_mm_m : uic.k_lin_kN_mm_m;
-      const f_max_kN_m = inFasteningZone ? fz.f_max_kN_m : uic.f_max_kN_m;
+      const inSwitchZone = szActive && x_mid >= szStartX && x_mid <= szEndX;
+      const k_lin_kN_mm_m = inSwitchZone ? sz.k_lin_kN_mm_m : (inFasteningZone ? fz.k_lin_kN_mm_m : uic.k_lin_kN_mm_m);
+      const f_max_kN_m = inSwitchZone ? sz.f_max_kN_m : (inFasteningZone ? fz.f_max_kN_m : uic.f_max_kN_m);
       let k_lin_el = k_lin_kN_mm_m * 1000 * (elemLength / 1000);
       let f_max_el = f_max_kN_m * 1000 * (elemLength / 1000);
       // Le seuil elastique-plastique doit correspondre au coude de la loi bilineaire
@@ -299,11 +307,13 @@ class Solver {
 
   solve() {
     const TOLERANCE = 1e-4;
-    // 250 iterations : necessaire pour les cas avec appareil de dilatation (AD), ou le fort
-    // contraste de raideur (barre AD quasi nulle vs barres/ressorts normaux) ralentit fortement
-    // la convergence du point fixe (Picard) par rapport aux cas sans AD (~20-50 iter. suffisent).
-    // Le solveur bande restant tres rapide, ce budget plus large ne coute presque rien en temps de calcul.
-    const MAX_ITER = 250;
+    // 500 iterations : la correction de la condition limite en extremite de rail (rail
+    // desormais reellement libre, et non plus artificiellement bloque) est physiquement correcte
+    // mais converge plus lentement, en particulier sur les configurations multi-travees complexes
+    // combinant plusieurs non-linearites (zones de raideur, AD, trafic partiel). Certains cas a
+    // 7 travees approchaient deja les 250 iterations precedentes ; ce budget plus large securise
+    // la convergence sans cout perceptible (solveur bande tres rapide).
+    const MAX_ITER = 500;
     const RELAX = 0.6;
 
     // Partie constante de K et F : ne depend PAS des deplacements (barres, conditions aux
@@ -368,9 +378,6 @@ class Solver {
 
     for (let n of this.nodes) {
       let i = n.id - 1;
-      if (n.type === 'rail' && (n.x === 0 || n.x === this.nodes[this.nodes.length - 2].x)) {
-        this.addK(K, i, i, PENALTY);
-      }
       if (n.type === 'deck') {
         if (n.x < L_ancrage || n.x > L_ancrage + L_pont) {
           this.addK(K, i, i, PENALTY);
@@ -487,7 +494,64 @@ function computeYDomain(values, refValues, opts) {
     lo = -m; hi = m;
   }
   if (opts.floorZero) lo = 0;
+  if (opts.ceilZero) hi = 0;
   return [lo, hi];
+}
+
+// Trouve le point d'extremum (max ou min) d'une serie de donnees pour l'annotation des pics.
+function findExtremum(data, key, mode) {
+  if (!data.length) return null;
+  let best = data[0], bestV = data[0][key];
+  for (let i = 1; i < data.length; i++) {
+    const v = data[i][key];
+    if (mode === 'max' ? v > bestV : v < bestV) { best = data[i]; bestV = v; }
+  }
+  return best;
+}
+
+// Hook partage pour l'interrogation des graphiques au survol/toucher : convertit la position
+// du curseur (souris ou doigt) en index du point de donnee le plus proche, en tenant compte
+// d'un eventuel redimensionnement CSS du SVG (rapport largeur intrinseque / largeur affichee).
+function useChartHover(svgRef, dataLength, innerW, margin, width) {
+  const [hoverIdx, setHoverIdx] = useState(null);
+  function handleMove(evt) {
+    const svg = svgRef.current;
+    if (!svg || !dataLength) return;
+    const rect = svg.getBoundingClientRect();
+    const touch = evt.touches && evt.touches[0];
+    const clientX = touch ? touch.clientX : evt.clientX;
+    if (clientX == null) return;
+    if (evt.cancelable) evt.preventDefault();
+    const scaleFactor = rect.width ? (width / rect.width) : 1;
+    const localX = (clientX - rect.left) * scaleFactor - margin.left;
+    const frac = Math.max(0, Math.min(1, localX / innerW));
+    setHoverIdx(Math.round(frac * (dataLength - 1)));
+  }
+  function handleLeave() { setHoverIdx(null); }
+  return {
+    hoverIdx,
+    overlayProps: {
+      onMouseMove: handleMove, onMouseLeave: handleLeave, onMouseDown: handleMove,
+      onTouchStart: handleMove, onTouchMove: handleMove, onTouchEnd: handleLeave,
+      style: { touchAction: 'none', cursor: 'crosshair' }
+    }
+  };
+}
+
+// Petite bulle d'info positionnee pres du curseur, repliee du cote oppose si elle deborderait
+// du cadre du graphique (bord droit notamment).
+function renderTooltipBox(x, innerW, innerH, lines) {
+  const boxW = 118, lineH = 13, padTop = 8, boxH = lineH * lines.length + padTop + 4;
+  let boxX = x + 10;
+  if (boxX + boxW > innerW) boxX = x - boxW - 10;
+  boxX = Math.max(0, Math.min(innerW - boxW, boxX));
+  const boxY = 4;
+  return e('g', { key: 'tooltip' },
+    e('rect', { x: boxX, y: boxY, width: boxW, height: boxH, rx: 5, fill: '#0D1626', stroke: '#3A4A66' }),
+    lines.map((line, i) => e('text', {
+      key: i, x: boxX + 7, y: boxY + padTop + 5 + i * lineH, fontSize: 10, fill: line.color || '#C6D2E6'
+    }, line.text))
+  );
 }
 
 function LineChartSVG(props) {
@@ -496,10 +560,13 @@ function LineChartSVG(props) {
   const colorBySign = props.colorBySign;
   const positiveColor = props.positiveColor || '#3DDC97', negativeColor = props.negativeColor || '#FF6B4A';
   const width = props.width || 900, height = props.height || 280;
+  const unit = props.unit || '';
   const compact = width < 480;
   const margin = compact ? { top: 16, right: 10, bottom: 24, left: 34 } : { top: 20, right: 20, bottom: 30, left: 50 };
   const innerW = width - margin.left - margin.right;
   const innerH = height - margin.top - margin.bottom;
+  const svgRef = useRef(null);
+  const { hoverIdx, overlayProps } = useChartHover(svgRef, data.length, innerW, margin, width);
   if (!data.length) return null;
 
   const xDomain = [data[0][xKey], data[data.length - 1][xKey]];
@@ -544,21 +611,66 @@ function LineChartSVG(props) {
     compact ? null : e('text', { x: innerW, y: yScale(rl.value) - 4, textAnchor: 'end', fontSize: '10', fill: rl.color }, rl.label)
   ));
 
-  // Etiquettes des reperes verticaux (Debut Pont, Appuis, AD, Zone attaches...) : elles peuvent
-  // etre proches en X (ex. Appui 1 = Debut Pont) et se chevauchaient toutes au meme niveau Y.
-  // On les etage sur 3 rangees en alternance pour degager la lecture.
-  const refX = refLinesX.map((rl, i) => e('g', { key: 'rx' + i },
-    e('line', { x1: xScale(rl.value), x2: xScale(rl.value), y1: 0, y2: innerH, stroke: '#3A4A66' }),
-    compact ? null : e('text', { x: xScale(rl.value) + 4, y: 10 + (i % 3) * 12, fontSize: '10', fill: '#6C7C9C' }, rl.label)
-  ));
+  // Etiquettes des reperes verticaux regroupees par "voie" (lane) : les appuis/AD au meme
+  // niveau en haut, les bornes de pont/zones au meme niveau en bas, en texte vertical (peu
+  // encombrant meme avec de nombreux appuis rapproches) plutot qu'empilees a des hauteurs eparses.
+  const laneY = { top: 11, bottom: innerH - 5 };
+  const laneRotate = { top: 90, bottom: -90 };
+  const refX = refLinesX.map((rl, i) => {
+    const lane = rl.lane || 'top';
+    const lx = xScale(rl.value), ly = laneY[lane];
+    return e('g', { key: 'rx' + i },
+      e('line', { x1: lx, x2: lx, y1: 0, y2: innerH, stroke: '#3A4A66' }),
+      (!rl.label) ? null : e('text', {
+        x: lx + 3, y: ly, fontSize: compact ? '8' : '9', fill: '#6C7C9C', textAnchor: 'start',
+        transform: 'rotate(' + laneRotate[lane] + ' ' + (lx + 3) + ' ' + ly + ')'
+      }, rl.label)
+    );
+  });
 
-  return e('svg', { viewBox: '0 0 ' + width + ' ' + height, width: width, height: height },
+  // Annotation des pics : maximum toujours affiche, minimum en plus s'il est significativement
+  // negatif (cas traction/compression), pour couvrir le cas a deux extremes sans surcharger
+  // un graphique a un seul pic (respiration, glissement...).
+  const peakMax = findExtremum(data, yKey, 'max');
+  const peakMin = findExtremum(data, yKey, 'min');
+  const showMin = peakMin && peakMax && peakMin[yKey] < 0 && Math.abs(peakMin[yKey] - peakMax[yKey]) > (yDomain[1] - yDomain[0]) * 0.08;
+  const peaks = [peakMax].concat(showMin ? [peakMin] : []).map((p, i) => {
+    const px = xScale(p[xKey]), py = yScale(p[yKey]);
+    const above = py > innerH / 2;
+    return e('g', { key: 'peak' + i },
+      e('circle', { cx: px, cy: py, r: 3, fill: '#0A1120', stroke: '#E9EEF7', strokeWidth: 1.5 }),
+      e('text', {
+        x: px, y: above ? py - 8 : py + 14, textAnchor: 'middle', fontSize: compact ? '9' : '10',
+        fontWeight: '600', fill: '#E9EEF7'
+      }, p[yKey].toFixed(1))
+    );
+  });
+
+  // Curseur d'interrogation : ligne verticale + point + bulle de valeur au survol/toucher.
+  let hoverLayer = null;
+  if (hoverIdx != null && data[hoverIdx]) {
+    const hd = data[hoverIdx];
+    const hx = xScale(hd[xKey]), hy = yScale(hd[yKey]);
+    hoverLayer = e('g', { key: 'hover' },
+      e('line', { x1: hx, x2: hx, y1: 0, y2: innerH, stroke: '#7FB3E8', strokeWidth: 1, strokeDasharray: '3 3' }),
+      e('circle', { cx: hx, cy: hy, r: 3.5, fill: '#0A1120', stroke: '#7FB3E8', strokeWidth: 2 }),
+      renderTooltipBox(hx, innerW, innerH, [
+        { text: hd[xKey].toFixed(1) + ' m', color: '#8593AD' },
+        { text: hd[yKey].toFixed(2) + ' ' + unit, color: '#E9EEF7' }
+      ])
+    );
+  }
+
+  return e('svg', { ref: svgRef, viewBox: '0 0 ' + width + ' ' + height, width: width, height: height },
     e('g', { transform: 'translate(' + margin.left + ',' + margin.top + ')' },
       gridLines, refY, refX,
       tracePaths.map((p, i) => e('path', { key: 'trace' + i, d: p.d, fill: 'none', stroke: p.color, strokeWidth: '2' })),
+      peaks,
       e('line', { x1: 0, x2: innerW, y1: innerH, y2: innerH, stroke: '#3A4A66' }),
       e('text', { x: 0, y: innerH + (compact ? 16 : 20), textAnchor: 'start', fontSize: tickFont, fill: '#8593AD' }, xDomain[0].toFixed(0) + ' m'),
-      e('text', { x: innerW, y: innerH + (compact ? 16 : 20), textAnchor: 'end', fontSize: tickFont, fill: '#8593AD' }, xDomain[1].toFixed(0) + ' m')
+      e('text', { x: innerW, y: innerH + (compact ? 16 : 20), textAnchor: 'end', fontSize: tickFont, fill: '#8593AD' }, xDomain[1].toFixed(0) + ' m'),
+      e('rect', Object.assign({ x: 0, y: 0, width: innerW, height: innerH, fill: 'transparent' }, overlayProps)),
+      hoverLayer
     )
   );
 }
@@ -567,10 +679,13 @@ function BarChartSVG(props) {
   const data = props.data, xKey = props.xKey, yKey = props.yKey, yDomain = props.yDomain, color = props.color;
   const refLinesY = props.refLinesY || [], refLinesX = props.refLinesX || [];
   const width = props.width || 900, height = props.height || 240;
+  const unit = props.unit || '';
   const compact = width < 480;
   const margin = compact ? { top: 16, right: 10, bottom: 20, left: 34 } : { top: 20, right: 20, bottom: 30, left: 50 };
   const innerW = width - margin.left - margin.right;
   const innerH = height - margin.top - margin.bottom;
+  const svgRef = useRef(null);
+  const { hoverIdx, overlayProps } = useChartHover(svgRef, data.length, innerW, margin, width);
   if (!data.length) return null;
 
   const xDomain = [data[0][xKey], data[data.length - 1][xKey]];
@@ -591,7 +706,19 @@ function BarChartSVG(props) {
     compact ? null : e('text', { x: innerW, y: yScale(rl.value) - 4, textAnchor: 'end', fontSize: '10', fill: rl.color }, rl.label)
   ));
 
-  const refX = refLinesX.map((rl, i) => e('line', { key: 'rx' + i, x1: xScale(rl.value), x2: xScale(rl.value), y1: 0, y2: innerH, stroke: '#3A4A66' }));
+  const laneY = { top: 11, bottom: innerH - 5 };
+  const laneRotate = { top: 90, bottom: -90 };
+  const refX = refLinesX.map((rl, i) => {
+    const lane = rl.lane || 'top';
+    const lx = xScale(rl.value), ly = laneY[lane];
+    return e('g', { key: 'rx' + i },
+      e('line', { x1: lx, x2: lx, y1: 0, y2: innerH, stroke: '#3A4A66' }),
+      (!rl.label) ? null : e('text', {
+        x: lx + 3, y: ly, fontSize: compact ? '8' : '9', fill: '#6C7C9C', textAnchor: 'start',
+        transform: 'rotate(' + laneRotate[lane] + ' ' + (lx + 3) + ' ' + ly + ')'
+      }, rl.label)
+    );
+  });
 
   const bars = data.map((d, i) => e('rect', {
     key: 'bar' + i,
@@ -602,12 +729,37 @@ function BarChartSVG(props) {
     fill: color
   }));
 
-  return e('svg', { viewBox: '0 0 ' + width + ' ' + height, width: width, height: height },
+  const peakMax = findExtremum(data, yKey, 'max');
+  const peak = peakMax ? e('g', { key: 'peak' },
+    e('circle', { cx: xScale(peakMax[xKey]), cy: yScale(peakMax[yKey]), r: 3, fill: '#0A1120', stroke: '#E9EEF7', strokeWidth: 1.5 }),
+    e('text', {
+      x: xScale(peakMax[xKey]), y: Math.max(10, yScale(peakMax[yKey]) - 8), textAnchor: 'middle',
+      fontSize: compact ? '9' : '10', fontWeight: '600', fill: '#E9EEF7'
+    }, peakMax[yKey].toFixed(2))
+  ) : null;
+
+  let hoverLayer = null;
+  if (hoverIdx != null && data[hoverIdx]) {
+    const hd = data[hoverIdx];
+    const hx = xScale(hd[xKey]);
+    hoverLayer = e('g', { key: 'hover' },
+      e('line', { x1: hx, x2: hx, y1: 0, y2: innerH, stroke: '#7FB3E8', strokeWidth: 1, strokeDasharray: '3 3' }),
+      e('circle', { cx: hx, cy: yScale(hd[yKey]), r: 3.5, fill: '#0A1120', stroke: '#7FB3E8', strokeWidth: 2 }),
+      renderTooltipBox(hx, innerW, innerH, [
+        { text: hd[xKey].toFixed(1) + ' m', color: '#8593AD' },
+        { text: hd[yKey].toFixed(2) + ' ' + unit, color: '#E9EEF7' }
+      ])
+    );
+  }
+
+  return e('svg', { ref: svgRef, viewBox: '0 0 ' + width + ' ' + height, width: width, height: height },
     e('g', { transform: 'translate(' + margin.left + ',' + margin.top + ')' },
-      gridLines, refY, refX, bars,
+      gridLines, refY, refX, bars, peak,
       e('line', { x1: 0, x2: innerW, y1: innerH, y2: innerH, stroke: '#3A4A66' }),
       e('text', { x: 0, y: innerH + (compact ? 14 : 18), textAnchor: 'start', fontSize: tickFont, fill: '#8593AD' }, xDomain[0].toFixed(0) + ' m'),
-      e('text', { x: innerW, y: innerH + (compact ? 14 : 18), textAnchor: 'end', fontSize: tickFont, fill: '#8593AD' }, xDomain[1].toFixed(0) + ' m')
+      e('text', { x: innerW, y: innerH + (compact ? 14 : 18), textAnchor: 'end', fontSize: tickFont, fill: '#8593AD' }, xDomain[1].toFixed(0) + ' m'),
+      e('rect', Object.assign({ x: 0, y: 0, width: innerW, height: innerH, fill: 'transparent' }, overlayProps)),
+      hoverLayer
     )
   );
 }
@@ -617,10 +769,13 @@ function MultiLineChartSVG(props) {
   const yDomain = props.yDomain;
   const refLinesY = props.refLinesY || [], refLinesX = props.refLinesX || [];
   const width = props.width || 900, height = props.height || 280;
+  const unit = props.unit || '';
   const compact = width < 480;
   const margin = compact ? { top: 16, right: 10, bottom: 24, left: 34 } : { top: 20, right: 20, bottom: 30, left: 50 };
   const innerW = width - margin.left - margin.right;
   const innerH = height - margin.top - margin.bottom;
+  const svgRef = useRef(null);
+  const { hoverIdx, overlayProps } = useChartHover(svgRef, data.length, innerW, margin, width);
   if (!data.length) return null;
 
   const xDomain = [data[0][xKey], data[data.length - 1][xKey]];
@@ -642,14 +797,39 @@ function MultiLineChartSVG(props) {
     compact ? null : e('text', { x: innerW, y: yScale(rl.value) - 4, textAnchor: 'end', fontSize: '10', fill: rl.color }, rl.label)
   ));
 
-  const refX = refLinesX.map((rl, i) => e('g', { key: 'rx' + i },
-    e('line', { x1: xScale(rl.value), x2: xScale(rl.value), y1: 0, y2: innerH, stroke: '#3A4A66' }),
-    compact ? null : e('text', { x: xScale(rl.value) + 4, y: 10 + (i % 3) * 12, fontSize: '10', fill: '#6C7C9C' }, rl.label || '')
-  ));
+  const laneY = { top: 11, bottom: innerH - 5 };
+  const laneRotate = { top: 90, bottom: -90 };
+  const refX = refLinesX.map((rl, i) => {
+    const lane = rl.lane || 'top';
+    const lx = xScale(rl.value), ly = laneY[lane];
+    return e('g', { key: 'rx' + i },
+      e('line', { x1: lx, x2: lx, y1: 0, y2: innerH, stroke: '#3A4A66' }),
+      (!rl.label) ? null : e('text', {
+        x: lx + 3, y: ly, fontSize: compact ? '8' : '9', fill: '#6C7C9C', textAnchor: 'start',
+        transform: 'rotate(' + laneRotate[lane] + ' ' + (lx + 3) + ' ' + ly + ')'
+      }, rl.label)
+    );
+  });
 
   const paths = series.map((s, si) => {
     const path = data.map((d, i) => (i === 0 ? 'M' : 'L') + ' ' + xScale(d[xKey]).toFixed(1) + ' ' + yScale(d[s.yKey]).toFixed(1)).join(' ');
     return e('path', { key: 'series' + si, d: path, fill: 'none', stroke: s.color, strokeWidth: '2' });
+  });
+
+  // Pic (max en valeur absolue) annote pour chaque serie - typiquement un seul pic net
+  // pour la respiration du rail/tablier.
+  const peaks = series.map((s, si) => {
+    const pMax = findExtremum(data, s.yKey, 'max'), pMin = findExtremum(data, s.yKey, 'min');
+    const p = Math.abs(pMax[s.yKey]) >= Math.abs(pMin[s.yKey]) ? pMax : pMin;
+    const px = xScale(p[xKey]), py = yScale(p[s.yKey]);
+    const above = py > innerH / 2;
+    return e('g', { key: 'peak' + si },
+      e('circle', { cx: px, cy: py, r: 3, fill: '#0A1120', stroke: s.color, strokeWidth: 1.5 }),
+      e('text', {
+        x: px, y: above ? py - 8 : py + 14, textAnchor: 'middle', fontSize: compact ? '9' : '10',
+        fontWeight: '600', fill: s.color
+      }, p[s.yKey].toFixed(1))
+    );
   });
 
   const legendGap = compact ? 70 : 150;
@@ -660,13 +840,31 @@ function MultiLineChartSVG(props) {
     )
   ));
 
-  return e('svg', { viewBox: '0 0 ' + width + ' ' + height, width: width, height: height },
+  let hoverLayer = null;
+  if (hoverIdx != null && data[hoverIdx]) {
+    const hd = data[hoverIdx];
+    const hx = xScale(hd[xKey]);
+    const markers = series.map((s, si) => e('circle', {
+      key: 'hm' + si, cx: hx, cy: yScale(hd[s.yKey]), r: 3.5, fill: '#0A1120', stroke: s.color, strokeWidth: 2
+    }));
+    const lines = [{ text: hd[xKey].toFixed(1) + ' m', color: '#8593AD' }]
+      .concat(series.map(s => ({ text: s.label + ': ' + hd[s.yKey].toFixed(2) + ' ' + unit, color: s.color })));
+    hoverLayer = e('g', { key: 'hover' },
+      e('line', { x1: hx, x2: hx, y1: 0, y2: innerH, stroke: '#7FB3E8', strokeWidth: 1, strokeDasharray: '3 3' }),
+      markers,
+      renderTooltipBox(hx, innerW, innerH, lines)
+    );
+  }
+
+  return e('svg', { ref: svgRef, viewBox: '0 0 ' + width + ' ' + height, width: width, height: height },
     e('g', { transform: 'translate(' + margin.left + ',' + margin.top + ')' },
-      gridLines, refY, refX, paths,
+      gridLines, refY, refX, paths, peaks,
       e('line', { x1: 0, x2: innerW, y1: innerH, y2: innerH, stroke: '#3A4A66' }),
       e('text', { x: 0, y: innerH + (compact ? 16 : 20), textAnchor: 'start', fontSize: tickFont, fill: '#8593AD' }, xDomain[0].toFixed(0) + ' m'),
       e('text', { x: innerW, y: innerH + (compact ? 16 : 20), textAnchor: 'end', fontSize: tickFont, fill: '#8593AD' }, xDomain[1].toFixed(0) + ' m'),
-      legend
+      legend,
+      e('rect', Object.assign({ x: 0, y: 0, width: innerW, height: innerH, fill: 'transparent' }, overlayProps)),
+      hoverLayer
     )
   );
 }
@@ -714,6 +912,12 @@ const defaultSupports = [
 
 function IvoDashboard() {
   const [deltaTDeck, setDeltaTDeck] = useState(35);
+  // Longueur de la zone d'ancrage (voie libre de part et d'autre du pont, hors influence de
+  // l'ouvrage). Par defaut 100m est souvent insuffisant : le palier libre du rail (ou la
+  // contrainte cesse de croitre) n'est atteint qu'apres une longueur theorique N_max/f_max qui
+  // peut depasser 150-200m pour des deltaT courants - relevee ici a 200m, et ajustable/verifiee
+  // ci-dessous car elle depend directement de deltaT_rail et de la resistance de la voie.
+  const [anchorageLengthM, setAnchorageLengthM] = useState(200);
   const [deltaTRail, setDeltaTRail] = useState(50);
   const [hasTraffic, setHasTraffic] = useState(false);
   const [hasSettlement, setHasSettlement] = useState(false);
@@ -737,6 +941,30 @@ function IvoDashboard() {
   const [fasteningZoneEnd, setFasteningZoneEnd] = useState(160);
   const [fasteningKLin, setFasteningKLin] = useState(10);
   const [fasteningFMax, setFasteningFMax] = useState(12);
+
+  // Rotation des abouts de tablier : sous charge verticale (trafic), le tablier tourne a ses
+  // abouts. Cette rotation, combinee au bras de levier entre la fibre neutre/appui et le niveau
+  // du rail, induit un deplacement horizontal supplementaire au niveau du rail (UIC 774-3).
+  // Modelisee en reutilisant le meme mecanisme que la denivellation d'appui (deplacement impose
+  // au noeud tablier de l'appui concerne), les deux contributions pouvant se cumuler.
+  const [hasRotation, setHasRotation] = useState(false);
+  const [rotationSupportId, setRotationSupportId] = useState(defaultSupports[0].id);
+  const [rotationMrad, setRotationMrad] = useState(2); // milliradians, ordre de grandeur courant sous LM71
+  const [rotationLeverArmMm, setRotationLeverArmMm] = useState(1200); // hauteur fibre neutre/appui -> niveau rail
+
+  // Appareil de voie (aiguillage) dans ou pres de la zone d'interaction : impose un critere de
+  // deplacement plus strict (tolerance geometrique de l'aiguillage), ET peut optionnellement
+  // imposer une raideur/resistance de voie locale differente (attaches specifiques d'appareil),
+  // comme la zone d'attaches. Par defaut : memes valeurs que la voie courante non chargee, donc
+  // aucun effet sur la courbe tant qu'elles ne sont pas ajustees - seul le critere de deplacement
+  // dedie est actif par defaut. Valeurs a confirmer selon le referentiel applicable au projet.
+  const [hasSwitchZone, setHasSwitchZone] = useState(false);
+  const [switchZoneStart, setSwitchZoneStart] = useState(90);
+  const [switchZoneEnd, setSwitchZoneEnd] = useState(120);
+  const [switchZoneLimitMm, setSwitchZoneLimitMm] = useState(2);
+  const [switchZoneKLin, setSwitchZoneKLin] = useState(20);
+  const [switchZoneFMax, setSwitchZoneFMax] = useState(20);
+
 
   // Synthese IA (optionnelle) : appelle UNE FONCTION SERVEUR (Cloud Function / Cloud Run) que
   // vous deployez vous-meme et qui detient la cle API Anthropic cote serveur. Ce fichier ne
@@ -774,6 +1002,7 @@ function IvoDashboard() {
       const removeIndex = idx === 0 ? 1 : idx;
       const next = prev.filter((_, i) => i !== removeIndex);
       if (!next.some(s => s.id === settlementSupportId)) setSettlementSupportId(next[0].id);
+      if (!next.some(s => s.id === rotationSupportId)) setRotationSupportId(next[0].id);
       return next;
     });
   }
@@ -806,15 +1035,18 @@ function IvoDashboard() {
       spans: spans.map(s => ({ id: s.id, length_m: s.length_m, area_mm2: s.area_mm2 })),
       supports: supports.map((s, i) => {
         const settlement = (hasSettlement && s.id === settlementSupportId) ? settlementMm : 0;
+        // Deplacement horizontal induit par la rotation d'about : theta(rad) x bras de levier(mm)
+        const rotationDisp = (hasRotation && s.id === rotationSupportId) ? (rotationMrad / 1000) * rotationLeverArmMm : 0;
         return {
           position_m: supportPositions[i],
           type: s.type,
           stiffness_kN_mm: s.stiffness_kN_mm,
-          settlement_mm: settlement
+          settlement_mm: settlement + rotationDisp
         };
       })
     };
 
+    config.track.anchorageLength_m = anchorageLengthM;
     config.track.fasteningZone = {
       enabled: hasFasteningZone,
       xStart_m: fasteningZoneStart,
@@ -823,6 +1055,16 @@ function IvoDashboard() {
       f_max_kN_m: fasteningFMax
     };
     config.track.expansionDevice = { enabled: hasExpansionDevice, position_m: expansionDevicePos };
+    // Zone d'appareil de voie : peut aussi imposer une raideur/resistance locale (comme la zone
+    // d'attaches) en plus du critere de deplacement dedie - par defaut memes valeurs que la voie
+    // courante non chargee (aucun effet sur la courbe tant qu'elles ne sont pas modifiees).
+    config.track.switchZone = {
+      enabled: hasSwitchZone,
+      xStart_m: switchZoneStart,
+      xEnd_m: switchZoneEnd,
+      k_lin_kN_mm_m: switchZoneKLin,
+      f_max_kN_m: switchZoneFMax
+    };
 
     const mesher = new Mesher(config);
     mesher.generate();
@@ -831,8 +1073,9 @@ function IvoDashboard() {
     const processor = new PostProcessor(solver);
     const r = processor.getResults();
     return { data: r.graphData, converged: r.converged, iterations: r.iterations, adDebattement: r.adDebattement };
-  }, [deltaTDeck, deltaTRail, hasTraffic, hasSettlement, settlementSupportId, settlementMm, spans, supports, supportPositions, totalBridgeLength,
-      hasFasteningZone, fasteningZoneStart, fasteningZoneEnd, fasteningKLin, fasteningFMax, hasExpansionDevice, expansionDevicePos]);
+  }, [deltaTDeck, deltaTRail, hasTraffic, hasSettlement, settlementSupportId, settlementMm, hasRotation, rotationSupportId, rotationMrad, rotationLeverArmMm, spans, supports, supportPositions, totalBridgeLength, anchorageLengthM,
+      hasFasteningZone, fasteningZoneStart, fasteningZoneEnd, fasteningKLin, fasteningFMax, hasExpansionDevice, expansionDevicePos,
+      hasSwitchZone, switchZoneStart, switchZoneEnd, switchZoneKLin, switchZoneFMax]);
 
   const data = result.data, converged = result.converged, iterations = result.iterations;
   const adDebattement = result.adDebattement;
@@ -840,17 +1083,31 @@ function IvoDashboard() {
   const maxCompression = Math.min.apply(null, data.map(d => d.contrainte));
   const maxGlissement = Math.max.apply(null, data.map(d => d.glissement));
   const maxRespiration = Math.max.apply(null, data.map(d => Math.abs(d.deplRail)));
+  const switchZonePoints = hasSwitchZone ? data.filter(d => d.x >= switchZoneStart && d.x <= switchZoneEnd) : [];
+  const maxGlissementSwitchZone = switchZonePoints.length ? Math.max.apply(null, switchZonePoints.map(d => d.glissement)) : null;
 
-  const L_ancrage = baseConfig.track.anchorageLength_m;
+  const L_ancrage = anchorageLengthM;
+  // Longueur theorique necessaire pour que le rail atteigne son regime asymptotique (palier libre)
+  // avant le pont : N_max (effort de blocage thermique total) / f_max (resistance plastique voie
+  // non chargee). Si la zone d'ancrage est plus courte, la contrainte n'a pas fini de monter quand
+  // elle atteint le pont, ce qui fausse la lecture du comportement en zone courante.
+  const N_max_kN = Math.abs(baseConfig.materials.railSteel.E_MPa * (baseConfig.track.area_mm2 * 2) * baseConfig.materials.railSteel.alpha * deltaTRail) / 1000;
+  const anchorageRequiredM = N_max_kN / baseConfig.track.uicResistance.unloaded.f_max_kN_m;
+  const anchorageInsufficient = anchorageLengthM < anchorageRequiredM;
   const pontDebut = L_ancrage, pontFin = L_ancrage + totalBridgeLength;
   const supportRefLinesX = supportPositions.map((p, i) => ({
     value: pontDebut + p,
-    label: 'Appui ' + (i + 1)
+    label: 'Appui ' + (i + 1),
+    lane: 'top'
   }));
-  const adRefLinesX = hasExpansionDevice ? [{ value: expansionDevicePos, label: 'AD' }] : [];
+  const adRefLinesX = hasExpansionDevice ? [{ value: expansionDevicePos, label: 'AD', lane: 'top' }] : [];
   const fastZoneRefLinesX = hasFasteningZone ? [
-    { value: fasteningZoneStart, label: 'Zone attaches' },
-    { value: fasteningZoneEnd, label: '' }
+    { value: fasteningZoneStart, label: 'Zone attaches', lane: 'bottom' },
+    { value: fasteningZoneEnd, label: '', lane: 'bottom' }
+  ] : [];
+  const switchZoneRefLinesX = hasSwitchZone ? [
+    { value: switchZoneStart, label: 'AV', lane: 'bottom' },
+    { value: switchZoneEnd, label: '', lane: 'bottom' }
   ] : [];
 
   // Construit un resume compact (pas les 100+ points du graphe) de la configuration et des
@@ -863,17 +1120,20 @@ function IvoDashboard() {
         deltaT_tablier_C: deltaTDeck, deltaT_rail_C: deltaTRail,
         charge_train_LM71: hasTraffic,
         denivellation_appui: hasSettlement ? { appui: supports.find(s => s.id === settlementSupportId), tassement_mm: settlementMm } : null,
+        rotation_about_tablier: hasRotation ? { appui: supports.find(s => s.id === rotationSupportId), rotation_mrad: rotationMrad, bras_levier_mm: rotationLeverArmMm, deplacement_induit_mm: (rotationMrad / 1000) * rotationLeverArmMm } : null,
         appareil_dilatation: hasExpansionDevice ? { position_m: expansionDevicePos, debattement_admissible_mm: adCapacityMm } : null,
-        zone_attaches_modifiee: hasFasteningZone ? { de_m: fasteningZoneStart, a_m: fasteningZoneEnd, k_lin_kN_mm_m: fasteningKLin, f_max_kN_m: fasteningFMax } : null
+        zone_attaches_modifiee: hasFasteningZone ? { de_m: fasteningZoneStart, a_m: fasteningZoneEnd, k_lin_kN_mm_m: fasteningKLin, f_max_kN_m: fasteningFMax } : null,
+        appareil_de_voie: hasSwitchZone ? { de_m: switchZoneStart, a_m: switchZoneEnd, limite_deplacement_mm: switchZoneLimitMm, k_lin_kN_mm_m: switchZoneKLin, f_max_kN_m: switchZoneFMax } : null
       },
-      structure: { travees: spans, appuis: supports, longueur_totale_m: totalBridgeLength },
+      structure: { travees: spans, appuis: supports, longueur_totale_m: totalBridgeLength, zone_ancrage_m: anchorageLengthM },
       resultats: {
         convergence: converged, iterations: iterations,
         contrainte_max_traction_MPa: maxTraction, contrainte_max_compression_MPa: maxCompression,
         glissement_max_mm: maxGlissement, respiration_rail_max_mm: maxRespiration,
-        debattement_AD_mm: adDebattement
+        debattement_AD_mm: adDebattement,
+        glissement_max_zone_appareil_de_voie_mm: maxGlissementSwitchZone
       },
-      seuils_reference: { traction_MPa: 92, compression_MPa: -92, glissement_mm: 4 }
+      seuils_reference: { traction_MPa: 92, compression_MPa: -72, glissement_mm: 4, glissement_zone_appareil_de_voie_mm: hasSwitchZone ? switchZoneLimitMm : null }
     };
     try {
       const res = await fetch(aiEndpoint, {
@@ -901,15 +1161,14 @@ function IvoDashboard() {
 
   const header = e('div', { className: 'flex flex-row items-center justify-between mb-2 gap-2' },
     e('div', { className: 'min-w-0' },
-      e('p', { className: 'eyebrow mb-0.5 truncate' }, 'UIC 774-3 \u00b7 EN 1992-2 \u00b7 Analyse non lineaire'),
-      e('h1', { className: 'font-display text-lg sm:text-2xl font-semibold tracking-tight text-[#E9EEF7] truncate' }, 'Audit Interaction Voie-Ouvrage')
+      e('h1', { className: 'font-display text-lg sm:text-2xl font-semibold tracking-tight text-[#E9EEF7] truncate' }, 'Interaction Voie-Ouvrage')
     ),
     statusBadge
   );
 
   const configPanel = e('div', { className: 'panel p-3 space-y-2' },
     e('p', { className: 'eyebrow' }, 'Cas de charge'),
-    e('div', { className: 'flex flex-wrap gap-3 sm:gap-6 items-center' },
+    e('div', { className: 'flex flex-wrap gap-2 sm:gap-6 items-center' },
       e('div', { className: 'flex flex-col gap-2' },
         e('label', { className: 'text-sm font-semibold text-[#93A3C2]' }, 'Delta T Tablier (C) : ', e('span', { className: 'mono-num' }, deltaTDeck)),
         e('input', { type: 'range', min: '-30', max: '40', value: deltaTDeck, onChange: (ev) => setDeltaTDeck(Number(ev.target.value)), className: 'w-48' })
@@ -921,8 +1180,17 @@ function IvoDashboard() {
       e('div', { className: 'flex items-center gap-3' },
         e('input', { type: 'checkbox', id: 'traffic', checked: hasTraffic, onChange: (ev) => setHasTraffic(ev.target.checked), className: 'accent-[#7FB3E8]' }),
         e('label', { htmlFor: 'traffic', className: 'text-sm font-semibold text-[#C6D2E6] cursor-pointer' }, 'Charge Train LM71 (freinage + charge verticale)')
+      ),
+      e('div', { className: 'flex flex-col gap-2' },
+        e('label', { className: 'text-sm font-semibold text-[#93A3C2]' }, 'Zone d\'ancrage (m) : ', e('span', { className: 'mono-num' }, anchorageLengthM)),
+        e('input', { type: 'range', min: '50', max: '400', step: '10', value: anchorageLengthM, onChange: (ev) => setAnchorageLengthM(Number(ev.target.value)), className: 'w-48' })
       )
     ),
+    anchorageInsufficient ? e('p', { className: 'text-xs text-[#FFA94D]' },
+      '\u26a0 Zone d\'ancrage possiblement insuffisante : le palier libre du rail necessite theoriquement ~' +
+      anchorageRequiredM.toFixed(0) + ' m pour ce Delta T Rail, contre ' + anchorageLengthM + ' m actuellement. ' +
+      'Si le palier de contrainte demarre encore a l\'interieur du pont sur le graphique, augmentez cette longueur.'
+    ) : null,
     e('div', { className: 'pt-2 border-t border-[#1E2A42] flex flex-wrap gap-3 sm:gap-6 items-center' },
       e('div', { className: 'flex items-center gap-3' },
         e('input', { type: 'checkbox', id: 'settlement', checked: hasSettlement, onChange: (ev) => setHasSettlement(ev.target.checked), className: 'accent-[#FFA94D]' }),
@@ -941,6 +1209,37 @@ function IvoDashboard() {
       hasSettlement ? e('div', { className: 'flex flex-col gap-2' },
         e('label', { className: 'text-sm font-semibold text-[#93A3C2]' }, 'Tassement (mm) : ', e('span', { className: 'mono-num' }, settlementMm)),
         e('input', { type: 'range', min: '-30', max: '30', value: settlementMm, onChange: (ev) => setSettlementMm(Number(ev.target.value)), className: 'w-48' })
+      ) : null
+    ),
+    e('div', { className: 'pt-2 border-t border-[#1E2A42] flex flex-wrap gap-3 sm:gap-6 items-center' },
+      e('div', { className: 'flex items-center gap-3' },
+        e('input', { type: 'checkbox', id: 'rotation', checked: hasRotation, onChange: (ev) => setHasRotation(ev.target.checked), className: 'accent-[#FFA94D]' }),
+        e('label', { htmlFor: 'rotation', className: 'text-sm font-semibold text-[#C6D2E6] cursor-pointer' }, "Rotation d'about de tablier")
+      ),
+      hasRotation ? e('div', { className: 'flex flex-col gap-2' },
+        e('label', { className: 'text-sm font-semibold text-[#93A3C2]' }, 'About concerne'),
+        e('select', {
+          value: rotationSupportId,
+          onChange: (ev) => setRotationSupportId(Number(ev.target.value)),
+          className: 'border border-[#2A3B57] rounded px-2 py-1 text-sm'
+        }, supports.map((s, i) => e('option', { key: s.id, value: s.id },
+          'Appui ' + (i + 1) + ' (' + supportPositions[i] + ' m)'
+        )))
+      ) : null,
+      hasRotation ? e('div', { className: 'flex flex-col gap-2' },
+        e('label', { className: 'text-sm font-semibold text-[#93A3C2]' }, 'Rotation (mrad) : ', e('span', { className: 'mono-num' }, rotationMrad)),
+        e('input', { type: 'range', min: '-10', max: '10', step: '0.5', value: rotationMrad, onChange: (ev) => setRotationMrad(Number(ev.target.value)), className: 'w-40' })
+      ) : null,
+      hasRotation ? e('div', { className: 'flex flex-col gap-2' },
+        e('label', { className: 'text-sm font-semibold text-[#93A3C2]' }, 'Bras de levier (mm)'),
+        e('input', {
+          type: 'number', step: '50', value: rotationLeverArmMm,
+          onChange: (ev) => setRotationLeverArmMm(Number(ev.target.value)),
+          className: 'w-24 border border-[#2A3B57] rounded px-2 py-1 text-sm'
+        })
+      ) : null,
+      hasRotation ? e('span', { className: 'text-xs text-[#5C6B87] w-full' },
+        '\u2192 deplacement impose au tablier : ' + ((rotationMrad / 1000) * rotationLeverArmMm).toFixed(2) + ' mm (cumule avec la denivellation si le meme appui est concerne)'
       ) : null
     ),
     e('div', { className: 'pt-2 border-t border-[#1E2A42] flex flex-wrap gap-3 sm:gap-6 items-center' },
@@ -991,6 +1290,35 @@ function IvoDashboard() {
         e('label', { className: 'text-sm font-semibold text-[#93A3C2]' }, 'f_max (kN/m) : ', e('span', { className: 'mono-num' }, fasteningFMax)),
         e('input', { type: 'range', min: '1', max: '60', value: fasteningFMax, onChange: (ev) => setFasteningFMax(Number(ev.target.value)), className: 'w-40' })
       ) : null
+    ),
+    e('div', { className: 'pt-2 border-t border-[#1E2A42] flex flex-wrap gap-3 sm:gap-6 items-center' },
+      e('div', { className: 'flex items-center gap-3' },
+        e('input', { type: 'checkbox', id: 'switchzone', checked: hasSwitchZone, onChange: (ev) => setHasSwitchZone(ev.target.checked), className: 'accent-[#FF6B4A]' }),
+        e('label', { htmlFor: 'switchzone', className: 'text-sm font-semibold text-[#C6D2E6] cursor-pointer' }, "Appareil de voie (aiguillage) dans la zone")
+      ),
+      hasSwitchZone ? e('div', { className: 'flex items-center gap-2 text-sm flex-wrap' },
+        e('label', { className: 'text-[#93A3C2]' }, 'de'),
+        e('input', { type: 'number', step: '1', value: switchZoneStart, onChange: (ev) => setSwitchZoneStart(Number(ev.target.value)), className: 'w-20 border border-[#2A3B57] rounded px-2 py-1' }),
+        e('label', { className: 'text-[#93A3C2]' }, 'a'),
+        e('input', { type: 'number', step: '1', value: switchZoneEnd, onChange: (ev) => setSwitchZoneEnd(Number(ev.target.value)), className: 'w-20 border border-[#2A3B57] rounded px-2 py-1' }),
+        e('span', { className: 'text-[#8593AD]' }, 'm (repere modele)')
+      ) : null,
+      hasSwitchZone ? e('div', { className: 'flex flex-col gap-2' },
+        e('label', { className: 'text-sm font-semibold text-[#93A3C2]' }, 'Limite deplacement zone AV (mm) : ', e('span', { className: 'mono-num' }, switchZoneLimitMm)),
+        e('input', { type: 'range', min: '0.5', max: '4', step: '0.5', value: switchZoneLimitMm, onChange: (ev) => setSwitchZoneLimitMm(Number(ev.target.value)), className: 'w-40' })
+      ) : null,
+      hasSwitchZone ? e('div', { className: 'flex items-center gap-2 text-sm flex-wrap' },
+        e('label', { className: 'text-[#93A3C2]' }, 'Raideur k_lin'),
+        e('input', { type: 'number', step: '1', value: switchZoneKLin, onChange: (ev) => setSwitchZoneKLin(Number(ev.target.value)), className: 'w-16 border border-[#2A3B57] rounded px-2 py-1' }),
+        e('span', { className: 'text-[#8593AD]' }, 'kN/mm/m'),
+        e('label', { className: 'text-[#93A3C2] ml-2' }, 'Resistance f_max'),
+        e('input', { type: 'number', step: '1', value: switchZoneFMax, onChange: (ev) => setSwitchZoneFMax(Number(ev.target.value)), className: 'w-16 border border-[#2A3B57] rounded px-2 py-1' }),
+        e('span', { className: 'text-[#8593AD]' }, 'kN/m')
+      ) : null,
+      hasSwitchZone ? e('span', { className: 'text-xs text-[#5C6B87] w-full' },
+        "\u26a0 Limite de deplacement et voie courante (20/20) par defaut : aucun effet sur la courbe tant que la raideur/resistance ci-dessus n'est pas modifiee. " +
+        "A ajuster si votre appareil a des attaches/fixation differentes de la voie courante ; valeurs a confirmer selon le referentiel applicable."
+      ) : null
     )
   );
 
@@ -1011,7 +1339,7 @@ function IvoDashboard() {
     e('input', {
       type: 'number', min: '1', step: '100000', value: s.area_mm2,
       onChange: (ev) => updateSpan(i, 'area_mm2', Number(ev.target.value)),
-      className: 'w-20 flex-none border border-[#2A3B57] rounded px-1.5 py-1'
+      className: 'w-[7.5rem] flex-none border border-[#2A3B57] rounded px-1.5 py-1'
     }),
     e('span', { className: 'text-[#5C6B87] text-xs flex-none' }, 'mm\u00b2'),
     spans.length > 1 ? e('button', {
@@ -1045,31 +1373,31 @@ function IvoDashboard() {
 
   const totalTrackLength = 2 * L_ancrage + totalBridgeLength;
 
-  const bridgePanel = e('div', { className: 'panel p-3 space-y-2' },
+  const bridgePanel = e('div', { className: 'panel p-2 space-y-1' },
     e('p', { className: 'eyebrow' }, 'Geometrie'),
-    e('div', { className: 'flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3' },
-      e('h2', { className: 'font-display text-base font-semibold tracking-tight text-[#C6D2E6]' }, 'Structure du Tablier (Multi-Travees) \u2014 Longueur totale : ' + totalBridgeLength + ' m'),
+    e('div', { className: 'flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2' },
+      e('h2', { className: 'font-display text-base font-semibold tracking-tight text-[#C6D2E6]' }, 'Tablier (Multi-Travees) - ' + totalBridgeLength + ' m'),
       e('button', {
         onClick: addSpan,
         className: 'text-sm font-semibold px-3 py-1.5 rounded bg-[#3D6690] text-[#EAF1FA] hover:bg-[#4A78A8] self-start sm:self-auto'
       }, '+ Ajouter une travee')
     ),
     e('p', { className: 'mono-num text-xs text-[#8593AD]' },
-      'Longueur totale de voie modelisee : ' + L_ancrage + ' m (ancrage) + ' + totalBridgeLength + ' m (pont) + ' + L_ancrage + ' m (ancrage) = ' + totalTrackLength + ' m'
+      'Total length : ' + L_ancrage + ' m + ' + totalBridgeLength + ' m (pont) + ' + L_ancrage + ' m = ' + totalTrackLength + ' m'
     ),
     e('div', { className: 'overflow-x-auto' },
       e('div', { className: 'min-w-max flex items-center gap-2 text-xs font-semibold text-[#5C6B87] uppercase pb-1' },
         e('span', { className: 'w-6 flex-none' }, ''),
-        e('span', { className: 'w-14 flex-none' }, 'Long.'),
+        e('span', { className: 'w-16 flex-none' }, 'Long.'),
         e('span', { className: 'flex-none' }, ''),
-        e('span', { className: 'w-20 flex-none' }, 'Section'),
+        e('span', { className: 'w-[7.5rem] flex-none' }, 'Section'),
       ),
       spanRows
     ),
     e('div', { className: 'overflow-x-auto pt-2 border-t border-[#1E2A42]' },
       e('div', { className: 'min-w-max flex items-center gap-2 text-xs font-semibold text-[#5C6B87] uppercase pb-1' },
         e('span', { className: 'w-6 flex-none' }, ''),
-        e('span', { className: 'w-12 flex-none' }, 'Pos.'),
+        e('span', { className: 'w-16 flex-none' }, 'Pos.'),
         e('span', { className: 'w-[7.5rem] flex-none' }, 'Type'),
         e('span', { className: 'flex-none' }, 'Raideur')
       ),
@@ -1079,11 +1407,11 @@ function IvoDashboard() {
 
   function kpiCard(accentColor, iconText, label, value, danger) {
     return e('div', {
-      className: 'panel p-2.5 sm:p-3 flex items-center gap-2 sm:gap-3 relative overflow-hidden min-w-0',
-      style: { borderLeft: '3px solid ' + (danger ? '#FF6B4A' : accentColor) }
+      className: 'panel p-1 sm:p-1 flex items-center gap-1 sm:gap-3 relative overflow-hidden min-w-0',
+      style: { borderLeft: '1px solid ' + (danger ? '#FF6B4A' : accentColor) }
     },
       e('div', {
-        className: 'w-7 h-7 sm:w-9 sm:h-9 flex items-center justify-center rounded-md text-sm sm:text-base flex-none',
+        className: 'w-7 h-7 sm:w-8 sm:h-8 flex items-center justify-center rounded-md text-sm sm:text-base flex-none',
         style: { background: (danger ? '#3A1712' : accentColor + '22'), color: (danger ? '#FF6B4A' : accentColor) }
       }, iconText),
       e('div', { className: 'min-w-0' },
@@ -1094,25 +1422,35 @@ function IvoDashboard() {
   }
 
   const kpiList = [
-    kpiCard('#FF6B4A', '\u2193', 'Max Compression', maxCompression.toFixed(1) + ' MPa', maxCompression < -92),
-    kpiCard('#7FB3E8', '\u2194', 'Max Traction', maxTraction.toFixed(1) + ' MPa', maxTraction > 72),
+    kpiCard('#FF6B4A', '\u2193', 'Max Compression', maxCompression.toFixed(1) + ' MPa', maxCompression < -72),
+    kpiCard('#7FB3E8', '\u2191', 'Max Traction', maxTraction.toFixed(1) + ' MPa', maxTraction > 92),
     kpiCard('#FFA94D', '\u2248', 'Glissement Max', maxGlissement.toFixed(2) + ' mm', maxGlissement > 4),
     kpiCard('#B79CFB', '\u21c4', 'Respiration Rail Max', maxRespiration.toFixed(2) + ' mm', !hasExpansionDevice && maxRespiration > 5)
   ];
   if (hasExpansionDevice && adDebattement !== null) {
     kpiList.push(kpiCard('#3DDC97', '\u2b0c', 'Debattement AD', adDebattement.toFixed(1) + ' / ' + adCapacityMm + ' mm', adDebattement > adCapacityMm));
   }
+  if (hasSwitchZone && maxGlissementSwitchZone !== null) {
+    kpiList.push(kpiCard('#FF6B4A', '\u2691', 'Glissement Max (Appareil de Voie)', maxGlissementSwitchZone.toFixed(2) + ' / ' + switchZoneLimitMm + ' mm', maxGlissementSwitchZone > switchZoneLimitMm));
+  }
   const kpis = e('div', { className: 'grid grid-cols-2 md:grid-cols-4 xl:grid-cols-5 gap-2 sm:gap-3 mb-3' }, kpiList);
 
   // Domaines d'axe Y recalcules automatiquement a partir des valeurs reelles (+ marge),
   // en gardant les seuils reglementaires visibles pour le contexte.
-  const contrainteDomain = computeYDomain(data.map(d => d.contrainte), [92, -92], { symmetric: true });
+  const contrainteDomain = computeYDomain(data.map(d => d.contrainte), [92, -72], { symmetric: true });
   const glissementDomain = computeYDomain(data.map(d => d.glissement), [4], { floorZero: true });
   const respirationValues = data.map(d => d.deplRail).concat(data.map(d => d.deplTablier));
-  const respirationDomain = computeYDomain(respirationValues, [], { symmetric: true });
+  const respMin = Math.min.apply(null, respirationValues), respMax = Math.max.apply(null, respirationValues);
+  // Echelle adaptee au signe reel des valeurs : la respiration est generalement d'un seul signe
+  // (mouvement d'un seul cote du point fixe) - forcer une echelle symetrique gaspillait la moitie
+  // du graphique en espace vide. On ne garde la symetrie que si les deplacements changent de signe.
+  const respirationDomain = computeYDomain(respirationValues, [], {
+    floorZero: respMin >= 0,
+    ceilZero: respMax <= 0
+  });
 
-  const chartRefLinesX = [{ value: pontDebut, label: 'Debut Pont' }, { value: pontFin, label: 'Fin Pont' }]
-    .concat(supportRefLinesX).concat(adRefLinesX).concat(fastZoneRefLinesX);
+  const chartRefLinesX = [{ value: pontDebut, label: 'Debut Pont', lane: 'bottom' }, { value: pontFin, label: 'Fin Pont', lane: 'bottom' }]
+    .concat(supportRefLinesX).concat(adRefLinesX).concat(fastZoneRefLinesX).concat(switchZoneRefLinesX);
 
   const scopeStyle = (h) => ({ height: h + 'px', overflow: 'hidden', background: '#0A1120', border: '1px solid #1E2A42', borderRadius: '10px', padding: '6px 4px 2px' });
   // Hauteurs explicites (px) passees a la fois au SVG et a son conteneur : le SVG a une
@@ -1120,22 +1458,22 @@ function IvoDashboard() {
   // le graphique deborde de sa boite et chevauche visuellement le bloc suivant.
   const isCompactChart = chart1Width < 480;
   const mainChartH = isCompactChart ? 210 : 250;
-  const slipChartH = isCompactChart ? 140 : 170;
+  const slipChartH = isCompactChart ? 150 : 170;
   const respChartH = isCompactChart ? 210 : 250;
 
-  const charts = e('div', { className: 'panel p-3 space-y-3' },
+  const charts = e('div', { className: 'panel p-3 space-y-1' },
     e('p', { className: 'eyebrow' }, 'Resultats'),
     e('div', { className: 'w-full' },
-      e('h3', { className: 'font-display text-base font-semibold tracking-tight text-[#C6D2E6] mb-1' }, 'Contraintes Longitudinales dans le Rail (MPa)'),
+      e('h3', { className: 'font-display text-base font-semibold tracking-tight text-[#C6D2E6] mb-1' }, 'Contraintes dans le Rail (MPa)'),
       e('p', { className: 'text-xs text-[#5C6B87] mb-1 flex items-center gap-4' },
         e('span', null, e('span', { style: { color: '#3DDC97' } }, '\u25cf'), ' Traction'),
         e('span', null, e('span', { style: { color: '#FF6B4A' } }, '\u25cf'), ' Compression')
       ),
       e('div', { ref: chart1Ref, style: scopeStyle(mainChartH) },
         e(LineChartSVG, {
-          data: data, xKey: 'x', yKey: 'contrainte', yDomain: contrainteDomain, width: chart1Width, height: mainChartH,
+          data: data, xKey: 'x', yKey: 'contrainte', yDomain: contrainteDomain, width: chart1Width, height: mainChartH, unit: 'MPa',
           colorBySign: true, positiveColor: '#3DDC97', negativeColor: '#FF6B4A',
-          refLinesY: [{ value: 92, color: '#FF6B4A', label: 'Limite Traction (92 MPa)' }, { value: -92, color: '#FF6B4A', label: 'Limite Compression (-92 MPa)' }],
+          refLinesY: [{ value: 92, color: '#FF6B4A', label: 'Limite Traction (92 MPa)' }, { value: -72, color: '#FF6B4A', label: 'Limite Compression (-72 MPa)' }],
           refLinesX: chartRefLinesX
         })
       )
@@ -1144,7 +1482,7 @@ function IvoDashboard() {
       e('h3', { className: 'font-display text-base font-semibold tracking-tight text-[#C6D2E6] mb-1' }, 'Glissement Relatif Voie-Ouvrage (mm)'),
       e('div', { ref: chart2Ref, style: scopeStyle(slipChartH) },
         e(BarChartSVG, {
-          data: data, xKey: 'x', yKey: 'glissement', yDomain: glissementDomain, color: '#FFA94D', width: chart2Width, height: slipChartH,
+          data: data, xKey: 'x', yKey: 'glissement', yDomain: glissementDomain, color: '#FFA94D', width: chart2Width, height: slipChartH, unit: 'mm',
           refLinesY: [{ value: 4, color: '#FF6B4A', label: 'Limite Glissement (4 mm)' }],
           refLinesX: chartRefLinesX
         })
@@ -1157,7 +1495,7 @@ function IvoDashboard() {
       ),
       e('div', { ref: chart3Ref, style: scopeStyle(respChartH) },
         e(MultiLineChartSVG, {
-          data: data, xKey: 'x', yDomain: respirationDomain, width: chart3Width, height: respChartH,
+          data: data, xKey: 'x', yDomain: respirationDomain, width: chart3Width, height: respChartH, unit: 'mm',
           series: [
             { yKey: 'deplRail', color: '#B79CFB', label: 'Rail' },
             { yKey: 'deplTablier', color: '#3DDC97', label: 'Tablier' }
@@ -1170,9 +1508,11 @@ function IvoDashboard() {
 
   const footnote = e('p', { className: 'text-xs text-[#5C6B87] mt-4 text-center' },
     "Modele 1D barres/ressorts non lineaire - UIC 774-3 (loi bilineaire voie, resistance chargee/non chargee selon " +
-    "l'emprise du convoi, zone d'attaches a raideur modifiable) & EN 1992-2 (rigidite tablier multi-travees, appuis " +
-    "fixes/mobiles/elastiques, appareil de dilatation). " +
-    "Combinaison freinage + charge verticale + thermique + denivellation resolue simultanement (non-linearite des ressorts)."
+    "l'emprise du convoi, zone d'attaches et zone d'appareil de voie a raideur modifiable, limites -72/+92 MPa " +
+    "compression/traction) & EN 1992-2 (rigidite tablier multi-travees, appuis fixes/mobiles/elastiques, appareil " +
+    "de dilatation, rotation d'about de tablier). " +
+    "Combinaison freinage + charge verticale + thermique + denivellation + rotation d'about resolue simultanement (non-linearite des ressorts). " +
+    "Zone d'appareil de voie : critere de deplacement dedie + raideur/resistance ajustable, valeurs par defaut a confirmer."
   );
 
   const aiPanel = e('div', { className: 'panel p-3 mt-3 space-y-2' },
